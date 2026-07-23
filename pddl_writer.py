@@ -1,4 +1,3 @@
-```python
 """
 PDDL Problem Writer for the Trucks Domain.
 
@@ -281,22 +280,45 @@ def _compute_goals(                                                        # Def
                     arguments=args,                                        # Uses the arguments containing the fallback destination.
                 ))
 
-    # Relax ALL delivery deadlines to the extended time horizon.
-    # Anomalies make original deadlines impossible — the planner will still
-    # find the shortest plan (fewest actions) within the extended window.
-    final_goals = []                                                       # Creates an empty list for the final goals after deadline adjustment.
+    # Track packages whose deadlines were manually changed.
+    # Their selected deadlines must be preserved during replanning.
+    manually_changed_packages = set()
 
-    for goal in goals:                                                     # Loops through each remaining or modified goal.
+    if response:
+        for pkg_name, modified_goal in response.modify_goals.items():
+            if (
+                modified_goal.predicate == "delivered"
+                and len(modified_goal.arguments) >= 3
+            ):
+                new_deadline = modified_goal.arguments[2]
 
-        if goal.predicate == "delivered" and len(goal.arguments) >= 3:      # Checks whether the goal is a timed delivery with at least three arguments.
+                if new_deadline not in remaining_times:
+                    raise ValueError(
+                        f"Deadline change failed for {pkg_name}: "
+                        f"{new_deadline} is not a valid remaining time."
+                    )
 
-            # Replace original deadline with the last available time step
-            goal = GoalCondition(                                          # Creates a replacement goal with a relaxed deadline.
-                predicate=goal.predicate,                                  # Keeps the original delivered predicate.
-                arguments=[goal.arguments[0], goal.arguments[1], remaining_times[-1]],  # Keeps the package and destination but changes the deadline to the last available time.
+                manually_changed_packages.add(pkg_name)
+
+    # Relax ordinary delivery deadlines to the extended time horizon,
+    # but preserve manually selected deadlines for affected packages.
+    final_goals = []
+
+    for goal in goals:
+        if (
+            goal.predicate == "delivered"
+            and len(goal.arguments) >= 3
+            and goal.arguments[0] not in manually_changed_packages
+        ):
+            goal = GoalCondition(
+                predicate=goal.predicate,
+                arguments=[
+                    goal.arguments[0],
+                    goal.arguments[1],
+                    remaining_times[-1],
+                ],
             )
 
-        final_goals.append(goal)                                           # Adds the unchanged or deadline-adjusted goal to the final list.
+        final_goals.append(goal)
 
-    return final_goals                                                     # Returns the completed goal list to generate_problem_pddl().
-```
+    return final_goals
