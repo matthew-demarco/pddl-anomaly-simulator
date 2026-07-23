@@ -1,4 +1,3 @@
-```python
 """
 Case-Based Reasoner for Anomaly Recognition and Response.
 
@@ -270,4 +269,4 @@ class CaseLibrary:                                                          # De
     def list_cases(self) -> List[str]:                                      # Defines a method that returns readable summaries of all stored cases.
         """Return a summary of all known cases."""                          # Docstring explaining the purpose of list_cases().
         return [f"{c.name}: {c.description}" for c in self.cases]           # Builds and returns one formatted description string for every stored Case.
-```
+
