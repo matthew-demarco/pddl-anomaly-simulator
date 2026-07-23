@@ -1,4 +1,3 @@
-```python
 """
 World State Management for the Trucks Domain Simulation.
 
@@ -266,4 +265,4 @@ def state_summary(state: WorldState) -> str:                                # De
         )
 
     return '\n'.join(lines)                                                 # Combines all summary lines into one string separated by newline characters.
-```
+
