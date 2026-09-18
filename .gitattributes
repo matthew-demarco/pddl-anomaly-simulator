@@ -1,0 +1,6 @@
+*.bat text eol=crlf
+*.sh text eol=lf
+*.py text eol=lf
+*.pddl text eol=lf
+*.plan text eol=lf
+*.exe binary

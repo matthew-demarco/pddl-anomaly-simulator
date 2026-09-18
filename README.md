@@ -1,377 +1,238 @@
 # PDDL Anomaly Replanning Simulator
 
-A Python-based planning simulator that uses PDDL and Fast Downward to model truck deliveries and dynamically replan when unexpected events occur.
+A Trucks-domain simulator that executes an externally generated plan, applies
+a user-selected anomaly at a user-selected execution step, and uses Fast
+Downward to create and execute a replacement plan.
 
-This project extends an existing truck-delivery simulator with deterministic, user-scheduled anomalies. Users can choose the anomaly type, the exact execution step when it occurs, and the affected road, truck, package, or deadline.
+## Updated workflow
 
-## Features
+1. Generate the original plan outside the simulator.
+2. Supply that plan to the simulator with `--plan`.
+3. Supply the anomaly ID and step ID.
+4. The simulator displays and executes the original plan.
+5. At the selected step, it applies the anomaly and asks Fast Downward for a
+   new plan.
+6. The simulator displays and executes the new plan.
 
-- Deterministic step-based anomaly scheduling
-- Four supported anomaly types:
-  - Road closure
-  - Truck breakdown
-  - New delivery
-  - Deadline change
-- State-aware anomaly validation
-- Automatic PDDL regeneration
-- Fast Downward replanning
-- Multiple scheduled anomalies in one simulation
-- Case-Based Reasoning integration
-- Windows-compatible Fast Downward runtime included
-- 30 included Trucks-domain PDDL problem instances
-
-## How It Works
-
-1. Fast Downward generates an initial plan for a truck-delivery PDDL problem.
-2. The simulator executes the plan step by step.
-3. A manually scheduled anomaly is triggered at the selected execution step.
-4. The anomaly is validated against the current world state.
-5. The simulator updates the world state and/or planning goals.
-6. A modified PDDL problem is generated.
-7. Fast Downward creates a replacement plan.
-8. The simulator continues from the updated state instead of restarting from the beginning.
+The simulator no longer generates its own initial plan or randomly chooses the
+anomaly and step.
 
 ## Requirements
 
-- Windows
-- Python 3
-- Git, if cloning the repository
+- Python 3.9 or newer
+- No pip packages are required
+- Windows replanning support is included in this repository
+- macOS/Linux requires a locally compiled Fast Downward checkout
 
-A Windows-compatible Fast Downward runtime is included in the repository, so Fast Downward does not need to be built separately.
+## Windows quick start (Professor Schwartz)
 
-## Quick Start
+The included `fast-downward-24.06.1` folder contains the Windows planner
+binary, domain, and all 30 problem files. After cloning or downloading the
+repository, open PowerShell or Command Prompt in the project folder.
 
-Clone the repository:
-
-```powershell
-git clone https://github.com/matthew-demarco/pddl-anomaly-simulator.git
-cd pddl-anomaly-simulator
-```
-
-Run a baseline simulation:
+Check the setup:
 
 ```powershell
-py main.py --problem p01 --no-anomalies
+py check_setup.py
 ```
 
-List the available PDDL problems:
+Run the supplied original plan without an anomaly:
 
 ```powershell
-py main.py --list
+py main.py --problem p01 --plan plans\p01.plan
 ```
 
-The repository includes 30 planning problems, from `p01` through `p30`.
+Run the complete road-closure and replanning demonstration:
 
-## Manual Anomaly Syntax
+```powershell
+py main.py --problem p01 --plan plans\p01.plan --anomaly-id 1 --step-id 2 --anomaly-args l1 l3
+```
 
-Manual anomalies use the following format:
+For the easiest Windows demonstration, double-click:
+
+- `run_windows_clean.bat` for the original plan only
+- `run_windows_demo.bat` for the original plan, anomaly, and new plan
+
+## macOS quick start
+
+The compiled Fast Downward search binary is operating-system specific. First,
+configure the path to a Mac-compiled Fast Downward checkout one time:
+
+```bash
+python3 configure_fast_downward.py "/path/to/fast-downward.py"
+```
+
+The path may point to either `fast-downward.py` or its containing directory.
+The setting is saved locally in `.fast-downward-path` and is ignored by Git.
+
+Check the setup:
+
+```bash
+python3 check_setup.py
+```
+
+Run the supplied original plan without an anomaly:
+
+```bash
+python3 main.py --problem p01 --plan plans/p01.plan
+```
+
+Run the complete road-closure and replanning demonstration:
+
+```bash
+python3 main.py --problem p01 --plan plans/p01.plan \
+  --anomaly-id 1 --step-id 2 --anomaly-args l1 l3
+```
+
+After the one-time configuration, this shortcut runs the same demonstration:
+
+```bash
+bash run_mac_demo.sh
+```
+
+To inspect the currently selected planner:
+
+```bash
+python3 configure_fast_downward.py --show
+```
+
+You can still override the saved path for one run:
+
+```bash
+python3 main.py --problem p01 --plan plans/p01.plan \
+  --anomaly-id 1 --step-id 2 --anomaly-args l1 l3 \
+  --fast-downward "/another/path/to/fast-downward.py"
+```
+
+## Command cheat sheet
+
+### Clean execution
+
+Windows:
+
+```powershell
+py main.py --problem p01 --plan plans\p01.plan
+```
+
+macOS/Linux:
+
+```bash
+python3 main.py --problem p01 --plan plans/p01.plan
+```
+
+### One selected anomaly
+
+Windows:
+
+```powershell
+py main.py --problem p01 --plan plans\p01.plan --anomaly-id 1 --step-id 2 --anomaly-args l1 l3
+```
+
+macOS/Linux:
+
+```bash
+python3 main.py --problem p01 --plan plans/p01.plan --anomaly-id 1 --step-id 2 --anomaly-args l1 l3
+```
+
+### Multiple selected anomalies
+
+Windows PowerShell:
+
+```powershell
+py main.py --problem p01 --plan plans\p01.plan `
+  --anomaly road_closure:2:l1:l3 `
+  --anomaly new_delivery:8:package_new1:l2:l3
+```
+
+macOS/Linux:
+
+```bash
+python3 main.py --problem p01 --plan plans/p01.plan \
+  --anomaly road_closure:2:l1:l3 \
+  --anomaly new_delivery:8:package_new1:l2:l3
+```
+
+## Anomaly IDs and arguments
+
+| ID | Name | Required `--anomaly-args` |
+|---:|---|---|
+| 1 | Road closure | `FROM TO` |
+| 2 | Truck breakdown | `TRUCK` |
+| 3 | New delivery | `PACKAGE ORIGIN DESTINATION` |
+| 4 | Deadline change | `PACKAGE NEW_DEADLINE` |
+
+Names can be used instead of numeric IDs:
 
 ```text
---anomaly TYPE:STEP:DETAILS
+road_closure
+truck_breakdown
+new_delivery
+deadline_change
 ```
 
-The `--anomaly` option can be repeated to schedule multiple anomalies during one run.
-
-The step number refers to the global simulator execution step.
-
-## Road Closure
-
-Format:
+The repeatable all-in-one `--anomaly` formats are:
 
 ```text
 road_closure:STEP:FROM:TO
-```
-
-Example:
-
-```powershell
-py main.py --problem p01 --no-anomalies --anomaly road_closure:3:l2:l3
-```
-
-At execution step 3, the road between `l2` and `l3` is closed.
-
-The simulator updates the road network and asks Fast Downward to generate a new plan using the remaining connections.
-
-## New Delivery
-
-Format:
-
-```text
+truck_breakdown:STEP:TRUCK
 new_delivery:STEP:PACKAGE:ORIGIN:DESTINATION
-```
-
-Example:
-
-```powershell
-py main.py --problem p01 --no-anomalies --anomaly new_delivery:8:package_new1:l2:l3
-```
-
-At step 8, a new package named `package_new1` appears at `l2` and must be delivered to `l3`.
-
-The package is added to the current planning state and a new delivery goal is created before replanning.
-
-## Deadline Change
-
-Format:
-
-```text
 deadline_change:STEP:PACKAGE:NEW_DEADLINE
 ```
 
-Example:
+## Generate the original plan outside the simulator
+
+From the included Fast Downward directory on Windows:
 
 ```powershell
-py main.py --problem p01 --no-anomalies --anomaly deadline_change:3:package1:t2
+cd fast-downward-24.06.1
+py fast-downward.py --plan-file ..\plans\p01.plan trucks\domain.pddl trucks\p01.pddl --search "eager_greedy([ff()])"
+cd ..
 ```
 
-At step 3, the deadline for `package1` changes to `t2`.
-
-The modified deadline is included when the PDDL problem is regenerated for replanning.
-
-## Truck Breakdown
-
-Format:
-
-```text
-truck_breakdown:STEP:TRUCK
-```
-
-Example:
+The simulator then reads the generated file instead of calling Fast Downward
+for the original plan:
 
 ```powershell
-py main.py --problem p01 --no-anomalies --anomaly truck_breakdown:3:truck1
+py main.py --problem p01 --plan plans\p01.plan
 ```
 
-The simulator checks that the requested truck is active before applying the breakdown.
+## Plan validation
 
-A truck breakdown is rejected if only one active truck remains, because removing the final truck would make the delivery problem impossible.
+Before changing the state, the simulator validates every supplied action. It
+rejects malformed or impossible actions, including:
 
-Many of the included benchmark problems contain only one truck, so this command may demonstrate the validation behavior rather than a successful truck-breakdown replan.
+- driving from the wrong location or across a closed road;
+- using the wrong time step;
+- loading a package or truck from the wrong location;
+- violating truck-area loading or unloading order;
+- delivering a package from the wrong location; and
+- ending before every goal or scheduled anomaly is reached.
 
-## Multiple Anomalies
+## Tests
 
-Multiple anomalies can be scheduled by repeating the `--anomaly` option.
-
-Example:
+Windows:
 
 ```powershell
-py main.py --problem p01 --no-anomalies `
-  --anomaly road_closure:3:l2:l3 `
-  --anomaly new_delivery:8:package_new1:l2:l3
+py -m unittest discover -s tests -v
 ```
 
-This schedules:
+macOS/Linux:
 
-- a road closure at step 3
-- a new delivery at step 8
-
-The simulator replans after each valid anomaly and continues from the current world state.
-
-## Manual Anomaly Validation
-
-Manual anomaly requests are validated before being applied.
-
-Validation includes:
-
-- verifying that a requested road exists
-- verifying that a requested truck is active
-- preventing the final active truck from breaking down
-- preventing duplicate package names
-- checking that package origins are valid locations
-- checking that package destinations are valid locations
-- requiring different origin and destination locations
-- verifying that a deadline-change package exists
-- preventing deadline changes for packages that have already been delivered
-- verifying that a selected deadline is still a remaining time step
-
-Invalid anomalies are rejected and reported in the console.
-
-## Understanding `--no-anomalies`
-
-The original simulator included randomly generated anomalies.
-
-The `--no-anomalies` option disables the old random anomaly behavior.
-
-Manually supplied `--anomaly` options can still be used at the same time.
-
-Example:
-
-```powershell
-py main.py --problem p01 --no-anomalies --anomaly road_closure:3:l2:l3
+```bash
+python3 -m unittest discover -s tests -v
 ```
 
-Using `--no-anomalies` with a manual `--anomaly` makes demonstrations deterministic and repeatable.
+## Main files
 
-## Project Structure
-
-```text
-pddl-anomaly-simulator/
-│
-├── main.py
-├── anomalies.py
-├── simulator.py
-├── case_library.py
-├── pddl_writer.py
-├── planner.py
-├── state.py
-├── pddl_parser.py
-├── gui.py
-│
-└── fast-downward-24.06.1/
-    ├── fast-downward.py
-    ├── builds/
-    ├── driver/
-    └── trucks/
-        ├── domain.pddl
-        ├── p01.pddl
-        ├── p02.pddl
-        └── ...
-```
-
-### Main Files
-
-- `main.py` — command-line interface and manual anomaly parsing
-- `anomalies.py` — anomaly definitions, scheduling model, and validation
-- `simulator.py` — execution loop, anomaly triggering, and replanning
-- `case_library.py` — Case-Based Reasoning responses for anomaly types
-- `pddl_writer.py` — generates modified PDDL problems
-- `planner.py` — Fast Downward integration
-- `state.py` — world-state representation and action execution
-- `pddl_parser.py` — PDDL parsing
-- `gui.py` — graphical simulation interface
-- `fast-downward-24.06.1/` — bundled Fast Downward runtime
-- `fast-downward-24.06.1/trucks/` — Trucks PDDL domain and benchmark problems
-
-## About the PDDL Problems
-
-The files `p01.pddl` through `p30.pddl` are different truck-delivery planning scenarios.
-
-Objects such as:
-
-```text
-package1
-package2
-truck1
-l1
-l2
-t1
-t2
-```
-
-are objects inside the simulated planning environment.
-
-For example:
-
-- `package1` represents a delivery package
-- `truck1` represents a truck
-- `l1` represents a location
-- `t1` represents a time step
-
-These are PDDL planning objects, not Python software packages.
-
-## My Contribution
-
-I implemented the deterministic/manual-anomaly scheduling feature in the existing simulator.
-
-My primary changes were made in:
-
-- `anomalies.py`
-- `main.py`
-- `simulator.py`
-
-My work included:
-
-- creating the `ScheduledAnomaly` data model
-- adding command-line parsing for manual anomaly requests
-- adding the repeatable `--anomaly` option
-- allowing users to choose exact anomaly execution steps
-- implementing manual road-closure scheduling
-- implementing manual truck-breakdown scheduling
-- implementing manual new-delivery scheduling
-- implementing manual deadline-change scheduling
-- adding state-aware anomaly validation
-- integrating scheduled anomalies into the simulator execution loop
-- connecting manual anomalies to the existing Case-Based Reasoning pipeline
-- integrating anomaly-triggered PDDL regeneration and Fast Downward replanning
-- preparing and verifying the bundled Windows Fast Downward runtime
-
-## Collaboration
-
-This project was developed collaboratively using Git branches and pull requests.
-
-Ryan8536 contributed the deadline-preservation fix in `pddl_writer.py`.
-
-That change ensures that a manually selected package deadline remains preserved when the PDDL problem is regenerated during replanning.
-
-Ryan also contributed cleanup changes related to accidental Markdown code fences in Python source files.
-
-## Technologies and Concepts
-
-- Python
-- PDDL
-- Fast Downward
-- Git
-- GitHub
-- `argparse`
-- Python `dataclasses`
-- Python type hints
-- subprocess execution
-- Case-Based Reasoning
-- automated replanning
-- state validation
-- event scheduling
-- command-line interface design
-- Tkinter
-- JSON
-- graph-based road modeling
-
-## Known Limitations
-
-- Multiple anomalies can be scheduled in one run, but two anomalies assigned to the exact same execution step are not both processed.
-- The graphical interface currently exposes the older random-anomaly controls and does not provide manual anomaly scheduling controls.
-- Many included benchmark problems contain only one truck, which can prevent successful truck-breakdown replanning.
-- Project-level automated regression tests have not yet been added.
-- An anomaly scheduled after the simulation finishes will not occur.
-
-## Example Demonstrations
-
-### Deterministic Deadline Change
-
-```powershell
-py main.py --problem p01 --no-anomalies --anomaly deadline_change:3:package1:t2
-```
-
-### Road Closure
-
-```powershell
-py main.py --problem p01 --no-anomalies --anomaly road_closure:3:l2:l3
-```
-
-### Multiple Anomalies
-
-```powershell
-py main.py --problem p01 --no-anomalies `
-  --anomaly road_closure:3:l2:l3 `
-  --anomaly new_delivery:8:package_new1:l2:l3
-```
-
-During execution, useful output to look for includes:
-
-```text
-ANOMALY at step
-REPLANNING
-Plan found
-Status: SUCCESS
-```
-
-## Third-Party Components
-
-Fast Downward and the included Trucks-domain PDDL benchmark files are external components used by this project.
-
-The bundled Fast Downward runtime is included to make the simulator easier to run on Windows.
-
-These third-party files are not part of my original implementation contribution.
-
-## Repository
-
-https://github.com/matthew-demarco/pddl-anomaly-simulator
+- `main.py` — command-line input for the problem, plan, anomaly ID, and step ID
+- `simulator.py` — plan execution, anomaly handling, and replanning
+- `planner.py` — plan parsing, platform detection, and Fast Downward execution
+- `configure_fast_downward.py` — one-time macOS/Linux planner configuration
+- `check_setup.py` — verifies required files and the platform-specific planner
+- `state.py` — world state, action validation, and action execution
+- `anomalies.py` — anomaly definitions and state-aware validation
+- `case_library.py` — case-based anomaly responses
+- `pddl_writer.py` — regenerated PDDL problems used for replanning
+- `gui.py` — graphical interface using the same external inputs
+- `plans/p01.plan` — supplied example original plan
+- `tests/test_simulator.py` — automated tests

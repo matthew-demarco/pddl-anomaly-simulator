@@ -177,6 +177,71 @@ def initialize_from_problem(problem: PddlProblem) -> WorldState:            # De
 # Action application
 # ---------------------------------------------------------------------------
 
+def validate_action(state: WorldState, action: PlanAction) -> Optional[str]:
+    """Return an error message when an action is not valid in the current state."""
+    name = action.name.lower()
+    args = action.args
+    expected_counts = {"drive": 5, "load": 4, "unload": 4, "deliver": 4}
+
+    if name not in expected_counts:
+        return f"unknown action '{action.name}'"
+    if len(args) != expected_counts[name]:
+        return f"{name} expects {expected_counts[name]} arguments, got {len(args)}"
+
+    if name == "drive":
+        truck, from_loc, to_loc, t1, t2 = args
+        if state.truck_locations.get(truck) != from_loc:
+            return f"{truck} is not at {from_loc}"
+        if (from_loc, to_loc) not in state.connections:
+            return f"no active road connects {from_loc} to {to_loc}"
+        if state.current_time != t1:
+            return f"current time is {state.current_time}, not {t1}"
+        try:
+            time_index = state.time_steps.index(t1)
+        except ValueError:
+            return f"unknown time step {t1}"
+        if time_index + 1 >= len(state.time_steps) or state.time_steps[time_index + 1] != t2:
+            return f"{t2} is not the next time step after {t1}"
+
+    elif name == "load":
+        package, truck, area, location = args
+        if state.truck_locations.get(truck) != location:
+            return f"{truck} is not at {location}"
+        if state.package_locations.get(package) != location:
+            return f"{package} is not at {location}"
+        if (area, truck) not in state.free_areas:
+            return f"area {area} on {truck} is not free"
+        blocked = [
+            closer_area for closer_area, farther_area in state.closer
+            if farther_area == area and (closer_area, truck) not in state.free_areas
+        ]
+        if blocked:
+            return f"closer area(s) {', '.join(sorted(blocked))} must be free"
+
+    elif name == "unload":
+        package, truck, area, location = args
+        if state.truck_locations.get(truck) != location:
+            return f"{truck} is not at {location}"
+        if (package, truck, area) not in state.cargo:
+            return f"{package} is not in area {area} on {truck}"
+        blocked = [
+            closer_area for closer_area, farther_area in state.closer
+            if farther_area == area and (closer_area, truck) not in state.free_areas
+        ]
+        if blocked:
+            return f"closer area(s) {', '.join(sorted(blocked))} must be free"
+
+    elif name == "deliver":
+        package, location, t1, t2 = args
+        if state.package_locations.get(package) != location:
+            return f"{package} is not at {location}"
+        if state.current_time != t1:
+            return f"current time is {state.current_time}, not {t1}"
+        if (t1, t2) not in state.le_predicates:
+            return f"deadline {t2} is earlier than {t1} or is unknown"
+
+    return None
+
 def apply_action(state: WorldState, action: PlanAction) -> WorldState:       # Defines the function that changes the current state according to one completed plan action.
     """
     Apply a grounded plan action to the world state (in place) and return it.
@@ -187,6 +252,10 @@ def apply_action(state: WorldState, action: PlanAction) -> WorldState:       # D
         (unload ?package ?truck ?area ?location)
         (deliver ?package ?location ?t1 ?t2)
     """                                                                     # Function docstring listing the expected arguments for each supported action.
+
+    error = validate_action(state, action)
+    if error:
+        raise ValueError(f"Invalid action {action}: {error}")
 
     name = action.name.lower()                                              # Converts the action name to lowercase so capitalization does not affect matching.
     args = action.args                                                      # Creates a shorter local reference to the action argument list.
@@ -265,4 +334,3 @@ def state_summary(state: WorldState) -> str:                                # De
         )
 
     return '\n'.join(lines)                                                 # Combines all summary lines into one string separated by newline characters.
-
