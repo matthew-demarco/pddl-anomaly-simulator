@@ -24,7 +24,7 @@ anomaly and step.
 - Windows replanning support is included in this repository
 - macOS/Linux requires a locally compiled Fast Downward checkout
 
-## Windows quick start (Professor Schwartz)
+## Windows quick start 
 
 The included `fast-downward-24.06.1` folder contains the Windows planner
 binary, domain, and all 30 problem files. After cloning or downloading the
