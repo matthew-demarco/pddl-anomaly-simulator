@@ -20,7 +20,7 @@ from state import PlanAction                                                 # I
 
 # Path to the fast-downward directory (relative to this file's location)
 _THIS_DIR = Path(__file__).resolve().parent                                  # Finds the absolute directory containing planner.py so paths do not depend on where the terminal was opened.
-FAST_DOWNWARD_DIR = _THIS_DIR / "fast-downward-24.06.1"                     # Creates the path to the Fast Downward installation stored beside the simulator files.
+FAST_DOWNWARD_DIR = Path("/Users/leyladibra/FastDownward/downward")
 FAST_DOWNWARD_SCRIPT = FAST_DOWNWARD_DIR / "fast-downward.py"               # Creates the full path to the Python script used to start Fast Downward.
 
 

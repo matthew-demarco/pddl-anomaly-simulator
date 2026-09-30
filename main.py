@@ -23,7 +23,7 @@ from anomalies import AnomalyType, ScheduledAnomaly
 # ---------------------------------------------------------------------------
 
 PROJECT_DIR = Path(__file__).resolve().parent
-TRUCKS_DIR = PROJECT_DIR / "fast-downward-24.06.1" / "trucks"
+TRUCKS_DIR = Path("/Users/leyladibra/FastDownward/downward/trucks")
 DOMAIN_FILE = TRUCKS_DIR / "domain.pddl"
 
 
