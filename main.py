@@ -18,6 +18,11 @@ from pathlib import Path
 from simulator import Simulator
 from anomalies import AnomalyType, ScheduledAnomaly
 
+try:
+    import visualizer
+except ImportError:
+    visualizer = None
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -205,7 +210,18 @@ def build_id_anomaly(
 # Main
 # ---------------------------------------------------------------------------
 
+def _force_utf8_output():
+    """Windows consoles/pipes often default to cp1252, which cannot print the
+    emoji and box characters used in the report. Switch to UTF-8 safely."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def main():
+    _force_utf8_output()
     parser = argparse.ArgumentParser(
         description="Trucks Domain — Anomaly Replanning Simulator",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -258,6 +274,8 @@ Examples:
         metavar="VALUE",
         help="Objects used by --anomaly-id (road, truck, package, etc.)",
     )
+    parser.add_argument("--no-map", action="store_true", help="Skip the run map")
+    parser.add_argument("--map-file", type=str, default=None, help="Run map output path")
     parser.add_argument(
         "--verbose", "-v",
         action="store_true",
@@ -379,7 +397,19 @@ Examples:
         json_output=args.json_output,
     )
 
-    result = sim.run()
+    tee = visualizer.TeeCapture(sys.stdout) if visualizer else None
+    original_stdout = sys.stdout
+    if tee:
+        sys.stdout = tee
+    try:
+        result = sim.run()
+    finally:
+        sys.stdout = original_stdout
+    if tee and not args.no_map:
+        try:
+            visualizer.render(tee.text(), problem_path, out_path=args.map_file)
+        except Exception as exc:
+            print(f"\n  [Visualizer] Map generation failed: {exc}")
 
     # Exit code
     sys.exit(0 if result.success else 1)
