@@ -11,7 +11,7 @@ import tempfile
 import shutil
 import json
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict, Any
 from dataclasses import dataclass, field
 
 from pddl_parser import PddlProblem, parse_domain, parse_problem
@@ -114,6 +114,12 @@ class Simulator:
         self._replan_counter = 0
         self._export_seq = 0
 
+        # In-memory snapshot history, always collected regardless of
+        # --json-output, so a caller running the Simulator directly (e.g. a
+        # visualizer) can read sim.state_history after/while run() executes.
+        self.state_history: List[Dict[str, Any]] = []
+        self._last_event: Optional[str] = None
+
     def _export_state(self, suffix: str):
         if not self.export_states_dir:
             return
@@ -123,12 +129,14 @@ class Simulator:
         generate_problem_pddl(state=self.state, original_problem=self.problem, response=None, output_path=out_path)
         self._export_seq += 1
 
-    def _emit_json_state(self):
-        """Emit world state as JSON for UI visualization."""
-        if not self.json_output:
-            return
-            
-        data = {
+    def _build_state_snapshot(self) -> Dict[str, Any]:
+        """Build a plain-dict snapshot of the current world state.
+
+        Always available on self.state_history regardless of --json-output,
+        so a caller holding a Simulator instance directly (a visualizer, a
+        notebook, a test) can read it without going through stdout at all.
+        """
+        return {
             "locations": list(self.state.all_locations),
             "trucks": {t: loc for t, loc in self.state.truck_locations.items()},
             "packages_at_locations": {pkg: loc for pkg, loc in self.state.package_locations.items()},
@@ -137,8 +145,21 @@ class Simulator:
             "delivered": [{"package": p, "location": l, "time": t} for p, l, t in self.state.delivered],
             "current_time": self.state.current_time,
             "goals": [{"predicate": gc.predicate, "arguments": gc.arguments} for gc in self.problem.goal_conditions],
+            "last_action": self._last_event,
         }
-        self._log(f"@@MAP_STATE@@{json.dumps(data)}")
+
+    def _emit_json_state(self, event: Optional[str] = None):
+        """Record a snapshot in self.state_history, and also print it to
+        stdout as @@MAP_STATE@@ JSON when --json-output is set (kept for the
+        existing GUI, which consumes that stream over a subprocess pipe)."""
+        if event is not None:
+            self._last_event = event
+
+        snapshot = self._build_state_snapshot()
+        self.state_history.append(snapshot)
+
+        if self.json_output:
+            self._log(f"@@MAP_STATE@@{json.dumps(snapshot)}")
 
     def run(self) -> SimulationResult:
         """Execute the full simulation loop."""
@@ -180,7 +201,7 @@ class Simulator:
         self._log("")
 
         self._export_state("initial")
-        self._emit_json_state()
+        self._emit_json_state(event="(initial state)")
 
         step = 0
         plan_idx = 0
@@ -258,7 +279,7 @@ class Simulator:
                 plan = new_plan
                 plan_idx = 0
                 self._log("")
-                self._emit_json_state()
+                self._emit_json_state(event=f"ANOMALY: {anomaly.description}")
                 continue
 
             self._log(f"  Step {step:3d}: 🟢 {action}")
@@ -268,7 +289,7 @@ class Simulator:
             
             action_clean = f"action_{action.name}_" + "_".join(action.args)
             self._export_state(action_clean)
-            self._emit_json_state()
+            self._emit_json_state(event=str(action))
 
             if self.verbose:
                 self._log(state_summary(self.state))
@@ -398,3 +419,42 @@ class Simulator:
         except UnicodeEncodeError:
             # Fallback: replace unencodable characters
             print(message.encode('ascii', errors='replace').decode('ascii'))
+
+
+def get_run_snapshots(
+    domain_path: str,
+    problem_path: str,
+    **simulator_kwargs,
+) -> Dict[str, Any]:
+    """
+    Run a simulation in-process and return everything a visualizer needs,
+    with no subprocess and no stdout parsing involved.
+
+    Returns:
+        {
+          "snapshots": List[dict]   # sim.state_history
+          "summary": {
+              "status": "SUCCESS" | "FAILED",
+              "failure_reason": str,
+              "actions_executed": int,
+              "replans_triggered": int,
+              "anomalies": [{"type": str, "description": str}, ...],
+          },
+        }
+    """
+    sim = Simulator(domain_path=domain_path, problem_path=problem_path, **simulator_kwargs)
+    result = sim.run()
+
+    return {
+        "snapshots": sim.state_history,
+        "summary": {
+            "status": "SUCCESS" if result.success else "FAILED",
+            "failure_reason": result.failure_reason,
+            "actions_executed": result.total_actions_executed,
+            "replans_triggered": result.replans_triggered,
+            "anomalies": [
+                {"type": a.anomaly_type.name, "description": a.description}
+                for a in result.anomalies_encountered
+            ],
+        },
+    }

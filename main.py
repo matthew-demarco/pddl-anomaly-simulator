@@ -15,7 +15,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from simulator import Simulator
+from oldSimulator import Simulator
 from anomalies import AnomalyType, ScheduledAnomaly
 
 # ---------------------------------------------------------------------------
