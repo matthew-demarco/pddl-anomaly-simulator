@@ -88,10 +88,10 @@ the project folder.
 py check_setup.py
 
 # 2. Run the original plan without an anomaly
-py main.py --problem p01 --plan plans\p01.plan
+py main.py --problem p01 --plan plans/p01.plan
 
 # 3. Run the full road-closure and replanning demonstration
-py main.py --problem p01 --plan plans\p01.plan --anomaly-id 1 --step-id 2 --anomaly-args l1 l3
+py main.py --problem p01 --plan plans/p01.plan --anomaly-id 1 --step-id 2 --anomaly-args l1 l3
 ```
 
 Or double-click:
