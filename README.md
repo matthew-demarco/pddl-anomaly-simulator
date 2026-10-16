@@ -59,6 +59,7 @@ anomaly and step.
 | `run_windows_demo.bat` | Double-click demo: original plan, road closure, and replan. |
 | `run_windows_visualizer.bat` | Same as the demo, plus the run map. |
 | `run_mac_demo.sh` | macOS version of the road-closure demo. |
+| `make_plan.sh` | creates a new plan using fast downward |
 
 ### Data
 
@@ -88,10 +89,10 @@ the project folder.
 py check_setup.py
 
 # 2. Run the original plan without an anomaly
-py main.py --problem p01 --plan plans/p01.plan
+py main.py --problem p01 --plan plans\p01.plan
 
 # 3. Run the full road-closure and replanning demonstration
-py main.py --problem p01 --plan plans/p01.plan --anomaly-id 1 --step-id 2 --anomaly-args l1 l3
+py main.py --problem p01 --plan plans\p01.plan --anomaly-id 1 --step-id 2 --anomaly-args l1 l3
 ```
 
 Or double-click:
@@ -114,7 +115,7 @@ python3 configure_fast_downward.py "/path/to/fast-downward.py"
 python3 check_setup.py
 
 # 3. Run the original plan without an anomaly
-python3 main.py --problem p01 --plan plans/p01.plan
+python3 main.py --problem p01 --plan plans\p01.plan
 
 # 4. Run the full road-closure and replanning demonstration
 python3 main.py --problem p01 --plan plans/p01.plan \
@@ -266,6 +267,10 @@ path to your locally compiled `fast-downward.py`.
 
 To use your own problem, save it in `fast-downward-24.06.1/trucks/` (for
 example `mytest.pddl`) and run with `--problem mytest`.
+
+## Generating an original plan quickstart
+
+`bash make_plan.sh p02`
 
 ## Plan validation
 
