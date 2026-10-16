@@ -115,10 +115,10 @@ python3 configure_fast_downward.py "/path/to/fast-downward.py"
 python3 check_setup.py
 
 # 3. Run the original plan without an anomaly
-python3 main.py --problem p01 --plan plans\p01.plan
+python3 main.py --problem p01 --plan plans?p01.plan
 
 # 4. Run the full road-closure and replanning demonstration
-python3 main.py --problem p01 --plan plans/p01.plan \
+python3 main.py --problem p01 --plan plans/p01.plan/
   --anomaly-id 1 --step-id 2 --anomaly-args l1 l3
 ```
 
@@ -140,8 +140,8 @@ python3 configure_fast_downward.py --show
 Override the saved path for a single run:
 
 ```bash
-python3 main.py --problem p01 --plan plans/p01.plan \
-  --anomaly-id 1 --step-id 2 --anomaly-args l1 l3 \
+python3 main.py --problem p01 --plan plans/p01.plan/
+  --anomaly-id 1 --step-id 2 --anomaly-args l1 l3 /
   --fast-downward "/another/path/to/fast-downward.py"
 ```
 
