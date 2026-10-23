@@ -47,19 +47,24 @@ class SimulatorGUI:
         self.problem_combo = ttk.Combobox(control_frame, textvariable=self.problem_var, values=problems, state="readonly")
         self.problem_combo.pack(fill=tk.X, pady=(0, 15))
 
-        # Anomaly Chance
-        ttk.Label(control_frame, text="Anomaly Chance (0.0 - 1.0):").pack(anchor=tk.W, pady=(0, 2))
-        self.chance_var = tk.DoubleVar(value=0.3)
-        chance_scale = ttk.Scale(control_frame, from_=0.0, to=1.0, variable=self.chance_var, command=self._update_chance_label)
-        chance_scale.pack(fill=tk.X)
-        self.chance_label = ttk.Label(control_frame, text="30%")
-        self.chance_label.pack(anchor=tk.E, pady=(0, 15))
+        # Externally generated plan
+        ttk.Label(control_frame, text="Plan File:").pack(anchor=tk.W, pady=(0, 2))
+        self.plan_var = tk.StringVar(value=str(Path("plans") / "p01.plan"))
+        ttk.Entry(control_frame, textvariable=self.plan_var).pack(fill=tk.X, pady=(0, 15))
 
-        # Seed
-        ttk.Label(control_frame, text="Random Seed (Optional):").pack(anchor=tk.W, pady=(0, 2))
-        self.seed_var = tk.StringVar(value="")
-        ttk.Entry(control_frame, textvariable=self.seed_var).pack(fill=tk.X, pady=(0, 2))
-        ttk.Label(control_frame, text="Leave empty for random sequence.", font=("Segoe UI", 8, "italic")).pack(anchor=tk.W, pady=(0, 15))
+        # Deterministic anomaly input
+        ttk.Label(control_frame, text="Anomaly ID (Optional):").pack(anchor=tk.W, pady=(0, 2))
+        self.anomaly_id_var = tk.StringVar(value="")
+        ttk.Entry(control_frame, textvariable=self.anomaly_id_var).pack(fill=tk.X, pady=(0, 2))
+        ttk.Label(control_frame, text="1=road, 2=truck, 3=new delivery, 4=deadline", font=("Segoe UI", 8, "italic")).pack(anchor=tk.W)
+
+        ttk.Label(control_frame, text="Step ID (Optional):").pack(anchor=tk.W, pady=(8, 2))
+        self.step_id_var = tk.StringVar(value="")
+        ttk.Entry(control_frame, textvariable=self.step_id_var).pack(fill=tk.X)
+
+        ttk.Label(control_frame, text="Anomaly Arguments:").pack(anchor=tk.W, pady=(8, 2))
+        self.anomaly_args_var = tk.StringVar(value="")
+        ttk.Entry(control_frame, textvariable=self.anomaly_args_var).pack(fill=tk.X, pady=(0, 15))
 
         # Search Type
         ttk.Label(control_frame, text="Fast Downward Search:").pack(anchor=tk.W, pady=(0, 2))
@@ -85,6 +90,10 @@ class SimulatorGUI:
         ttk.Label(control_frame, text="Python Executable Path:").pack(anchor=tk.W, pady=(0, 2))
         self.python_var = tk.StringVar(value=DEFAULT_PYTHON)
         ttk.Entry(control_frame, textvariable=self.python_var).pack(fill=tk.X, pady=(0, 15))
+
+        ttk.Label(control_frame, text="Fast Downward Path (Optional):").pack(anchor=tk.W, pady=(0, 2))
+        self.fast_downward_var = tk.StringVar(value="")
+        ttk.Entry(control_frame, textvariable=self.fast_downward_var).pack(fill=tk.X, pady=(0, 15))
 
         # Buttons
         self.run_btn = ttk.Button(control_frame, text="▶ Run Simulation", command=self.run_simulation, style="Accent.TButton")
@@ -137,9 +146,6 @@ class SimulatorGUI:
         style = ttk.Style()
         style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"))
         self._last_state_data = None
-
-    def _update_chance_label(self, val):
-        self.chance_label.config(text=f"{float(val):.0%}")
 
     def log(self, message):
         self.output_queue.put(message)
@@ -400,13 +406,24 @@ class SimulatorGUI:
             return
 
         problem = self.problem_var.get().strip()
-        chance = self.chance_var.get()
-        seed = self.seed_var.get().strip()
+        plan = self.plan_var.get().strip()
+        anomaly_id = self.anomaly_id_var.get().strip()
+        step_id = self.step_id_var.get().strip()
+        anomaly_args = self.anomaly_args_var.get().split()
         verbose = self.verbose_var.get()
         python_exe = self.python_var.get().strip()
+        fast_downward = self.fast_downward_var.get().strip()
 
         if not os.path.exists(python_exe):
             messagebox.showerror("Error", f"Python executable not found at:\n{python_exe}\n\nPlease check the path.")
+            return
+
+        if not os.path.isfile(plan):
+            messagebox.showerror("Error", f"Plan file not found at:\n{plan}")
+            return
+
+        if bool(anomaly_id) != bool(step_id):
+            messagebox.showerror("Error", "Anomaly ID and Step ID must be entered together.")
             return
 
         search = self.search_var.get().strip()
@@ -428,9 +445,14 @@ class SimulatorGUI:
         self.canvas.delete("all")
 
         # Use -u to force unbuffered output so we get live updates in the UI
-        cmd = [python_exe, "-u", "main.py", "--problem", problem, "--anomaly-chance", str(chance), "--search", search, "--json-output"]
-        if seed:
-            cmd.extend(["--seed", seed])
+        cmd = [python_exe, "-u", "main.py", "--problem", problem, "--plan", plan, "--search", search, "--json-output"]
+        if fast_downward:
+            cmd.extend(["--fast-downward", fast_downward])
+        if anomaly_id:
+            cmd.extend(["--anomaly-id", anomaly_id, "--step-id", step_id])
+            if anomaly_args:
+                cmd.append("--anomaly-args")
+                cmd.extend(anomaly_args)
         if not verbose:
             cmd.append("--quiet")
             

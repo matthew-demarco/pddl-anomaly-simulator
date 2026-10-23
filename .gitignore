@@ -203,6 +203,9 @@ cython_debug/
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
 
+# Local machine path to a macOS/Linux Fast Downward checkout
+.fast-downward-path
+
 # Ruff stuff:
 .ruff_cache/
 

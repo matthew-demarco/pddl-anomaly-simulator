@@ -16,10 +16,10 @@ from dataclasses import dataclass, field
 
 from pddl_parser import PddlProblem, parse_domain, parse_problem
 from state import WorldState, PlanAction, apply_action, initialize_from_problem, state_summary
-from anomalies import AnomalyGenerator, AnomalyEvent, AnomalyType, ScheduledAnomaly, create_manual_event
+from anomalies import AnomalyEvent, AnomalyType, ScheduledAnomaly, create_manual_event
 from case_library import CaseLibrary, CaseResponse
 from pddl_writer import generate_problem_pddl
-from planner import run_fast_downward, cleanup_planner_files
+from planner import parse_plan, run_fast_downward
 
 
 # ---------------------------------------------------------------------------
@@ -46,9 +46,9 @@ class Simulator:
     Step-by-step plan executor with anomaly injection and replanning.
 
     Flow:
-        1. Generate initial plan with Fast Downward
+        1. Load an initial plan generated outside the simulator
         2. For each action in the plan:
-           a. Check for anomaly (via AnomalyGenerator)
+           a. Check for a user-scheduled anomaly
            b. If anomaly:
               i.   Recognize via CaseLibrary
               ii.  Apply PDDL modifications
@@ -63,17 +63,17 @@ class Simulator:
         self,
         domain_path: str,
         problem_path: str,
-        anomaly_chance: float = 0.2,
-        seed: Optional[int] = None,
+        plan_path: str,
         verbose: bool = True,
-        max_anomalies: int = 5,
         scheduled_anomalies: Optional[List[ScheduledAnomaly]] = None,
         search: str = "eager_greedy([ff()])",
+        fast_downward_script: Optional[str] = None,
         export_states_dir: Optional[str] = None,
         json_output: bool = False,
     ):
         self.domain_path = str(Path(domain_path).resolve())
         self.search = search
+        self.fast_downward_script = fast_downward_script
         self.export_states_dir = export_states_dir
         self.json_output = json_output
         
@@ -89,7 +89,7 @@ class Simulator:
                     pass  # Ignore files that might be locked by editors in Windows
             
         self.problem_path = str(Path(problem_path).resolve())
-        self.anomaly_chance = anomaly_chance
+        self.plan_path = str(Path(plan_path).resolve())
         self.verbose = verbose
 
         # Parse the domain and problem
@@ -100,11 +100,6 @@ class Simulator:
         self.state = initialize_from_problem(self.problem)
 
         # Components
-        self.anomaly_gen = AnomalyGenerator(
-            anomaly_chance=anomaly_chance,
-            seed=seed,
-            max_anomalies=max_anomalies,
-        )
         self.scheduled_anomalies = list(scheduled_anomalies or [])
 
         self.case_library = CaseLibrary()
@@ -147,25 +142,30 @@ class Simulator:
         self._log("=" * 65)
         self._log(f"  Problem: {self.problem.name}")
         self._log(f"  Domain:  {self.domain.name}")
-        self._log(f"  Anomaly chance: {self.anomaly_chance:.0%}")
+        self._log(f"  Supplied plan: {self.plan_path}")
+        self._log(f"  Scheduled anomalies: {len(self.scheduled_anomalies)}")
         self._log(f"  Case library: {len(self.case_library.cases)} cases loaded")
         self._log("=" * 65)
         self._log("")
 
         # --- Initial plan ---
         self._log("━" * 65)
-        self._log("  PHASE 1: Generating initial plan")
+        self._log("  PHASE 1: Loading supplied initial plan")
         self._log("━" * 65)
 
-        cleanup_planner_files()
-        plan = run_fast_downward(self.domain_path, self.problem_path, search=self.search)
-
-        if plan is None:
-            self._log("  ❌ Fast Downward could not find an initial plan.")
-            self.result.failure_reason = "No initial plan found."
+        try:
+            plan = parse_plan(self.plan_path)
+        except (OSError, ValueError) as error:
+            self._log(f"  ❌ Could not load supplied plan: {error}")
+            self.result.failure_reason = f"Invalid supplied plan: {error}"
             return self.result
 
-        self._log(f"  ✅ Initial plan: {len(plan)} actions")
+        if not plan:
+            self._log("  ❌ The supplied plan contains no actions.")
+            self.result.failure_reason = "Supplied plan is empty."
+            return self.result
+
+        self._log(f"  ✅ Supplied plan loaded: {len(plan)} actions")
         self._log("")
         self._print_plan(plan)
 
@@ -213,6 +213,11 @@ class Simulator:
                     self._log(
                         f"  ⚠️ Scheduled anomaly at step {step} was rejected: {error}"
                     )
+                    self.result.failure_reason = (
+                        f"Scheduled anomaly at step {step} was rejected: {error}"
+                    )
+                    self.result.final_state = self.state
+                    return self.result
 
             if anomaly:
                 self._log(f"  ╔══════════════════════════════════════════════")
@@ -262,7 +267,13 @@ class Simulator:
                 continue
 
             self._log(f"  Step {step:3d}: 🟢 {action}")
-            self.state = apply_action(self.state, action)
+            try:
+                self.state = apply_action(self.state, action)
+            except ValueError as error:
+                self._log(f"  ❌ {error}")
+                self.result.failure_reason = str(error)
+                self.result.final_state = self.state
+                return self.result
             self.result.total_actions_executed += 1
             plan_idx += 1
             
@@ -279,11 +290,40 @@ class Simulator:
         self._log("━" * 65)
         self._log("  PHASE 3: Mission Report")
         self._log("━" * 65)
-        self.result.success = True
         self.result.final_state = self.state
+        pending_steps = sorted(item.step for item in self.scheduled_anomalies)
+        unsatisfied = self._unsatisfied_goals()
+        if pending_steps:
+            self.result.success = False
+            self.result.failure_reason = (
+                "Plan ended before scheduled anomaly step(s): "
+                + ", ".join(str(step) for step in pending_steps)
+            )
+        elif unsatisfied:
+            self.result.success = False
+            self.result.failure_reason = (
+                "Plan ended before satisfying: " + ", ".join(unsatisfied)
+            )
+        else:
+            self.result.success = True
         self._print_report()
 
         return self.result
+
+    def _unsatisfied_goals(self) -> List[str]:
+        """Return readable descriptions of goals missing from the final state."""
+        missing = []
+        for goal in self.problem.goal_conditions:
+            args = goal.arguments
+            satisfied = False
+            if goal.predicate == "delivered" and len(args) == 3:
+                satisfied = tuple(args) in self.state.delivered
+            elif goal.predicate == "at-destination" and len(args) == 2:
+                satisfied = tuple(args) in self.state.at_destination
+
+            if not satisfied:
+                missing.append(f"({goal.predicate} {' '.join(args)})")
+        return missing
 
     def _apply_anomaly_to_state(self, anomaly: AnomalyEvent, response: CaseResponse):
         """Apply the immediate effects of an anomaly to the world state."""
@@ -349,13 +389,27 @@ class Simulator:
             self._log(f"    ...")
 
         # Invoke Fast Downward on the modified problem
-        cleanup_planner_files()
         plan = run_fast_downward(
             self.domain_path,
             temp_problem,
             search=self.search,
             plan_file=temp_plan,
+            fast_downward_script=self.fast_downward_script,
         )
+
+        if plan is not None:
+            # The generated problem contains all accumulated anomaly goal
+            # changes.  Keeping it as the current problem ensures a later
+            # replan does not forget an earlier new delivery/deadline change.
+            self.problem = parse_problem(temp_problem)
+            self.state.time_steps = list(self.problem.objects.get("time", []))
+            self.state.le_predicates = {
+                (args[0], args[1])
+                for predicate, args in self.problem.init_facts
+                if predicate == "le" and len(args) == 2
+            }
+
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
         return plan
 
@@ -384,9 +438,9 @@ class Simulator:
 
         # Check goal satisfaction
         if r.final_state:
-            delivered = r.final_state.delivered
-            at_dest = r.final_state.at_destination
-            self._log(f"  Deliveries completed: {len(delivered) + len(at_dest)}")
+            completed = {p for p, _, _ in r.final_state.delivered}
+            completed.update(p for p, _ in r.final_state.at_destination)
+            self._log(f"  Deliveries completed: {len(completed)}")
 
         self._log("")
         self._log("=" * 65)

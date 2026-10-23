@@ -5,7 +5,6 @@ Invokes Fast Downward to solve a PDDL problem and parses the resulting plan.
 """                                                                         # Explains that this module runs Fast Downward and converts the resulting plan into simulator actions.
 
 import os                                                                    # Imports operating-system utilities; this import is present in the original file but is not currently used.
-import re                                                                    # Imports regular-expression utilities; this import is present in the original file but is not currently used.
 import subprocess                                                            # Allows the simulator to launch Fast Downward as an external command-line process.
 import sys                                                                   # Provides access to the Python interpreter currently running the simulator.
 from pathlib import Path                                                     # Provides platform-independent tools for constructing, resolving, reading, checking, and deleting file paths.
@@ -22,6 +21,61 @@ from state import PlanAction                                                 # I
 _THIS_DIR = Path(__file__).resolve().parent                                  # Finds the absolute directory containing planner.py so paths do not depend on where the terminal was opened.
 FAST_DOWNWARD_DIR = _THIS_DIR / "fast-downward-24.06.1"                     # Creates the path to the Fast Downward installation stored beside the simulator files.
 FAST_DOWNWARD_SCRIPT = FAST_DOWNWARD_DIR / "fast-downward.py"               # Creates the full path to the Python script used to start Fast Downward.
+FAST_DOWNWARD_CONFIG = _THIS_DIR / ".fast-downward-path"
+FAST_DOWNWARD_ENV_VAR = "FAST_DOWNWARD_PATH"
+
+
+def _normalize_fast_downward_path(value: str) -> Path:
+    """Resolve either a Fast Downward directory or fast-downward.py path."""
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = (_THIS_DIR / candidate).resolve()
+    else:
+        candidate = candidate.resolve()
+    if candidate.is_dir():
+        candidate = candidate / "fast-downward.py"
+    return candidate
+
+
+def resolve_fast_downward_script(explicit_path: Optional[str] = None) -> Path:
+    """Choose Fast Downward from CLI, environment, saved config, or bundle."""
+    if explicit_path:
+        return _normalize_fast_downward_path(explicit_path)
+
+    environment_path = os.environ.get(FAST_DOWNWARD_ENV_VAR)
+    if environment_path:
+        return _normalize_fast_downward_path(environment_path)
+
+    if FAST_DOWNWARD_CONFIG.is_file():
+        saved_path = FAST_DOWNWARD_CONFIG.read_text(encoding="utf-8").strip()
+        if saved_path:
+            return _normalize_fast_downward_path(saved_path)
+
+    return FAST_DOWNWARD_SCRIPT
+
+
+def validate_fast_downward_installation(script_path: Path) -> tuple[bool, str]:
+    """Check that the selected checkout has a binary for this operating system."""
+    if not script_path.is_file():
+        return False, f"Fast Downward script not found: {script_path}"
+
+    binary_name = "downward.exe" if os.name == "nt" else "downward"
+    binary_path = script_path.parent / "builds" / "release" / "bin" / binary_name
+    if binary_path.is_file():
+        return True, f"Fast Downward ready: {script_path}"
+
+    other_binary = "downward" if os.name == "nt" else "downward.exe"
+    other_path = script_path.parent / "builds" / "release" / "bin" / other_binary
+    if other_path.is_file():
+        platform_name = "Windows" if os.name == "nt" else "macOS/Linux"
+        return False, (
+            f"This Fast Downward checkout contains {other_binary}, which is not "
+            f"compatible with {platform_name}."
+        )
+
+    return False, (
+        f"Fast Downward is not compiled for this system. Missing: {binary_path}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -37,15 +91,19 @@ def parse_plan(plan_path: str) -> List[PlanAction]:                          # D
     """                                                                      # Documents the expected Fast Downward plan format and explains which lines are ignored.
     actions = []                                                             # Creates an empty list that will hold the parsed actions in their original execution order.
     text = Path(plan_path).read_text(encoding='utf-8')                       # Reads the complete plan file as UTF-8 text.
-    for line in text.strip().split('\n'):                                   # Removes outer whitespace, separates the file into lines, and examines each line in order.
-        line = line.strip()                                                  # Removes leading and trailing whitespace from the current plan line.
+    for line_number, line in enumerate(text.splitlines(), start=1):          # Separates the file into lines and retains line numbers for useful errors.
+        line = line.split(';', 1)[0].strip()                                 # Removes Fast Downward comments and surrounding whitespace.
         if not line or line.startswith(';'):                                # Checks whether the line is empty or is a Fast Downward comment or summary line.
             continue                                                        # Skips the current line because it does not represent an executable plan action.
-        # Remove surrounding parens
-        inner = line.strip('()')                                             # Removes the outer parentheses from a grounded action line.
+        if not (line.startswith('(') and line.endswith(')')):               # Rejects malformed input instead of silently treating it as an action.
+            raise ValueError(
+                f"Invalid plan syntax on line {line_number}: {line}"
+            )
+        inner = line[1:-1].strip()                                           # Removes exactly one pair of surrounding parentheses.
         tokens = inner.split()                                               # Separates the action name and all of its arguments into individual strings.
-        if tokens:                                                          # Confirms that the line produced at least one token before creating an action.
-            actions.append(PlanAction(name=tokens[0], args=tokens[1:]))      # Stores the first token as the action name and the remaining tokens as its ordered arguments.
+        if not tokens:                                                       # Rejects an empty pair of parentheses.
+            raise ValueError(f"Empty action on line {line_number}.")
+        actions.append(PlanAction(name=tokens[0], args=tokens[1:]))          # Stores the first token as the action name and the remaining tokens as its ordered arguments.
     return actions                                                          # Returns the complete ordered list of parsed PlanAction objects to the simulator.
 
 
@@ -59,6 +117,7 @@ def run_fast_downward(                                                       # D
     search: str = "eager_greedy([ff()])",                                   # Uses eager greedy search with the FF heuristic unless another Fast Downward search string is supplied.
     timeout: int = 120,                                                      # Limits the planner to 120 seconds by default so it cannot block the simulator indefinitely.
     plan_file: Optional[str] = None,                                         # Allows a caller to provide a custom plan-output path or use the default sas_plan location.
+    fast_downward_script: Optional[str] = None,                              # Allows macOS/Linux users to point at their own compiled Fast Downward checkout.
 ) -> Optional[List[PlanAction]]:                                             # Returns a list of PlanAction objects when a plan is available or None when planning fails.
     """
     Run Fast Downward on the given domain and problem files.
@@ -79,12 +138,21 @@ def run_fast_downward(                                                       # D
     # Resolve all paths to absolute (FD runs with a different cwd)
     domain_abs = str(Path(domain_path).resolve())                            # Converts the domain-file path to an absolute path because Fast Downward runs from another working directory.
     problem_abs = str(Path(problem_path).resolve())                          # Converts the problem-file path to an absolute path so it remains valid after the working directory changes.
-    plan_abs = str(Path(plan_file).resolve()) if plan_file else str(FAST_DOWNWARD_DIR / "sas_plan")  # Uses the requested output path when provided or the default sas_plan file inside Fast Downward otherwise.
+    selected_script = resolve_fast_downward_script(fast_downward_script)
+    selected_dir = selected_script.parent
+    plan_abs = str(Path(plan_file).resolve()) if plan_file else str(selected_dir / "sas_plan")  # Uses the requested output path when provided or the default sas_plan file inside Fast Downward otherwise.
+
+    installation_ok, installation_message = validate_fast_downward_installation(selected_script)
+    if not installation_ok:
+        print(f"  [Planner] {installation_message}")
+        if os.name != "nt":
+            print("  [Planner] Run: python3 configure_fast_downward.py /path/to/fast-downward.py")
+        return None
 
     # Build the command
     cmd = [                                                                  # Begins the ordered list of command-line arguments that will be passed to subprocess.
         python_exe,                                                          # Specifies the Python interpreter that will execute Fast Downward.
-        str(FAST_DOWNWARD_SCRIPT),                                           # Specifies the fast-downward.py script that performs translation and search.
+        str(selected_script),                                               # Specifies the fast-downward.py script that performs translation and search.
         "--plan-file", plan_abs,                                             # Tells Fast Downward where to write the generated plan.
         domain_abs,                                                          # Supplies the absolute path to the PDDL domain file.
         problem_abs,                                                         # Supplies the absolute path to the PDDL problem file.
@@ -100,7 +168,7 @@ def run_fast_downward(                                                       # D
             capture_output=True,                                             # Captures standard output and standard error instead of printing them automatically.
             text=True,                                                       # Returns captured output as normal Python strings rather than bytes.
             timeout=timeout,                                                 # Stops waiting and raises TimeoutExpired if the planner exceeds the allowed time.
-            cwd=str(FAST_DOWNWARD_DIR),                                      # Runs Fast Downward from its own directory so its relative internal paths work correctly.
+            cwd=str(selected_dir),                                           # Runs Fast Downward from its own directory so its relative internal paths work correctly.
         )
 
         # Fast Downward exit codes:
