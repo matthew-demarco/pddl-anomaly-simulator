@@ -68,6 +68,11 @@ def _find_balanced_parens(text: str, start: int) -> str:
     return text[start:]
 
 
+def _strip_comments(text: str) -> str:
+    """Remove ';' comments so parentheses inside comments are never parsed."""
+    return re.sub(r';[^\n]*', '', text)
+
+
 def _parse_facts(text: str) -> List[Tuple[str, List[str]]]:
     """Parse a list of ground facts like (at truck1 l3) from an init block."""
     facts = []
@@ -84,7 +89,7 @@ def _parse_facts(text: str) -> List[Tuple[str, List[str]]]:
 
 def parse_domain(filepath: str) -> PddlDomain:
     """Parse a PDDL domain file and return a PddlDomain object."""
-    text = Path(filepath).read_text(encoding='utf-8')
+    text = _strip_comments(Path(filepath).read_text(encoding='utf-8'))
 
     # Domain name
     name_match = re.search(r'\(domain\s+([\w-]+)\)', text)
@@ -120,7 +125,7 @@ def parse_domain(filepath: str) -> PddlDomain:
 
     # Actions
     actions = []
-    action_pattern = re.compile(r'\(:action\s+([\w-]+)', re.DOTALL)
+    action_pattern = re.compile(r'\(:action\s+([\w-]+)', re.DOTALL)  # [\w-] so 'drive-instant' is read whole
     for m in action_pattern.finditer(text):
         action_name = m.group(1)
         action_block = _find_balanced_parens(text, m.start())
@@ -186,7 +191,12 @@ def parse_domain(filepath: str) -> PddlDomain:
 
 def parse_problem(filepath: str) -> PddlProblem:
     """Parse a PDDL problem file and return a PddlProblem object."""
-    text = Path(filepath).read_text(encoding='utf-8')
+    return parse_problem_text(Path(filepath).read_text(encoding='utf-8'))
+
+
+def parse_problem_text(text: str) -> PddlProblem:
+    """Parse PDDL problem text (used for files and for browser uploads)."""
+    text = _strip_comments(text)
 
     # Problem name
     name_match = re.search(r'\(problem\s+([\w-]+)\)', text)
@@ -203,20 +213,25 @@ def parse_problem(filepath: str) -> PddlProblem:
         obj_block = _find_balanced_parens(text, obj_start.start())
         # Remove outer (:objects ... )
         obj_text = obj_block[len("(:objects"):-1]
-        for line in obj_text.strip().split('\n'):
-            line = line.strip()
-            if not line:
-                continue
-            if ' - ' in line:
-                parts = line.split(' - ')
-                obj_type = parts[-1].strip()
-                obj_names = parts[0].split()
-                if obj_type not in objects:
-                    objects[obj_type] = []
-                for name in obj_names:
-                    name = name.strip()
-                    if name:
+        # Token-based typed list: "a b - truck c - package" works on one line
+        # or across many lines.
+        pending: List[str] = []
+        tokens = obj_text.split()
+        i = 0
+        while i < len(tokens):
+            if tokens[i] == '-' and i + 1 < len(tokens):
+                obj_type = tokens[i + 1]
+                objects.setdefault(obj_type, [])
+                for name in pending:
+                    if name not in objects[obj_type]:
                         objects[obj_type].append(name)
+                pending = []
+                i += 2
+            else:
+                pending.append(tokens[i])
+                i += 1
+        if pending:                                   # untyped trailing names
+            objects.setdefault('object', []).extend(pending)
 
     # Init facts — use balanced parens to get the full (:init ...) block
     init_facts = []

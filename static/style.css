@@ -1,0 +1,242 @@
+/* Trucks Grid Visualizer — dark charcoal logistics theme */
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: #141414;
+  color: #d8d8d8;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  height: 100vh;
+  overflow: hidden;
+}
+
+#app {
+  display: flex;
+  height: 100vh;
+  gap: 8px;
+  padding: 8px;
+}
+
+/* ---------------- left: controls ---------------- */
+
+#controls {
+  width: 270px;
+  flex-shrink: 0;
+  background: #1e1e1e;
+  border: 1px solid #333;
+  border-radius: 6px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+}
+
+#controls h1 {
+  font-size: 15px;
+  color: #ecf0f1;
+  margin-bottom: 10px;
+}
+
+#controls label {
+  font-size: 12px;
+  color: #aab7b8;
+  margin-top: 8px;
+}
+
+#controls select, #controls input[type=text], #controls textarea {
+  background: #262626;
+  color: #d8d8d8;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 12px;
+  width: 100%;
+}
+
+#controls input[type=range] { width: 100%; }
+
+#controls textarea { resize: vertical; font-family: Consolas, monospace; }
+
+/* plan source, checkboxes and the anomaly builder (added) */
+.radio-row { display: flex; flex-direction: column; gap: 2px; }
+#controls label.radio, #controls label.check {
+  display: flex; align-items: center; gap: 6px; margin-top: 2px; color: #d8d8d8; cursor: pointer;
+}
+#controls label.check { margin-top: 6px; color: #aab7b8; }
+#save-plan-name { font-family: Consolas, monospace; }
+#load-plan-box { display: flex; flex-direction: column; gap: 4px; }
+#load-plan-box[hidden] { display: none; }
+
+#anomaly-builder {
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+}
+#anomaly-builder summary { font-size: 12px; color: #aab7b8; cursor: pointer; }
+#anomaly-builder[open] summary { margin-bottom: 2px; }
+#ab-fields { display: flex; flex-direction: column; }
+
+button {
+  border: none;
+  border-radius: 4px;
+  padding: 9px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-top: 6px;
+}
+
+button:disabled { opacity: .55; cursor: default; }
+button.primary { background: #e74c3c; color: #fff; }
+button.primary:hover { background: #c0392b; }
+button.secondary { background: #37474f; color: #d8d8d8; font-weight: 400; }
+button.secondary:hover { background: #455a64; }
+
+.hint { font-size: 11px; color: #8a8a8a; margin-top: 3px; }
+.hint.error { color: #ff7675; }
+.hint.ok { color: #55efc4; }
+
+/* ---------------- center: map ---------------- */
+
+#map-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+#canvas-wrap {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+#map {
+  background: #1e1e1e;
+  border: 1px solid #333;
+  border-radius: 6px;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+#playback {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #1e1e1e;
+  border: 1px solid #333;
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+
+#playback button {
+  margin-top: 0;
+  padding: 6px 10px;
+  background: #37474f;
+  color: #fff;
+}
+
+#slider-wrap { flex: 1; position: relative; display: flex; align-items: center; }
+#playback input[type=range] { flex: 1; width: 100%; }
+
+/* orange markers on the timeline where an anomaly triggered a replan (added) */
+.replan-tick {
+  position: absolute; top: -9px; width: 0; height: 0; transform: translateX(-50%); cursor: pointer;
+  border-left: 6px solid transparent; border-right: 6px solid transparent; border-top: 8px solid #f39c12;
+}
+.replan-tick.stopped { border-top-color: #e74c3c; }
+
+#frame-label {
+  font-size: 12px;
+  color: #aab7b8;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ---------------- right: data panel ---------------- */
+
+#data-panel {
+  width: 300px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+}
+
+.panel-block {
+  background: #1e1e1e;
+  border: 1px solid #333;
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.panel-block.grow {
+  flex: 1;
+  min-height: 120px;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-block h2 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #8a8a8a;
+  margin-bottom: 6px;
+}
+
+.big { font-size: 20px; font-weight: 700; color: #f1c40f; }
+.mono { font-family: Consolas, monospace; font-size: 11px; color: #aab7b8; margin-top: 4px; }
+
+.anomaly-note {
+  margin-top: 8px; padding: 6px 8px; border-left: 3px solid #f39c12; border-radius: 3px;
+  background: rgba(243,156,18,.12); color: #fbd38d; font-size: 12px;
+}
+.anomaly-note[hidden] { display: none; }
+
+/* active plan with progress (added) */
+.plan-list {
+  list-style: none;
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  max-height: 210px;
+  overflow-y: auto;
+  background: #181818;
+  border-radius: 4px;
+  padding: 3px 0;
+}
+.plan-list li { padding: 1px 8px; white-space: nowrap; color: #bdc3c7; }
+.plan-list li.done { color: #6b7378; }
+.plan-list li.done::before { content: "✓ "; color: #55efc4; }
+.plan-list li.now { background: rgba(231,76,60,.22); color: #fff; box-shadow: inset 3px 0 0 #e74c3c; }
+
+.goals, #truck-list, #package-list {
+  list-style: none;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.goals li.done { color: #55efc4; }
+.goals li.pending { color: #bdc3c7; }
+
+#truck-list li, #package-list li { color: #d8d8d8; }
+
+#log {
+  flex: 1;
+  overflow: auto;
+  font-family: Consolas, monospace;
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: #9fb8b8;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

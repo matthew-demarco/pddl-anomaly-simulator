@@ -1,0 +1,21 @@
+{
+	"folders": [
+		{
+			"name": "pddl-anomaly-simulator",
+			"path": ".."
+		},
+		{
+			"name": "fast-downward-24.06.1",
+			"path": "../../../Downloads/visualizationtest7/fast-downward-24.06.1"
+		},
+		{
+			"name": "static",
+			"path": "../../../Downloads/visualizationtest7/static"
+		},
+		{
+			"name": "tools",
+			"path": "../../../Downloads/visualizationtest7/tools"
+		}
+	],
+	"settings": {}
+}

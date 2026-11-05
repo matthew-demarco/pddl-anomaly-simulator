@@ -9,6 +9,9 @@ import json
 import math
 from pathlib import Path
 
+PROJECT_DIR = Path(__file__).resolve().parent
+TRUCKS_DIR = PROJECT_DIR / "fast-downward-24.06.1" / "trucks"
+
 # Try to detect default MSYS2 Python, otherwise fallback to system Python
 DEFAULT_PYTHON = r"C:\msys64\ucrt64\bin\python.exe"
 if not os.path.exists(DEFAULT_PYTHON):
@@ -18,7 +21,7 @@ class SimulatorGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Trucks Domain Anomaly Replanning Simulator")
-        self.root.geometry("1100x750")
+        self.root.geometry("1150x900")
         self.root.configure(padx=10, pady=10)
 
         # Process management
@@ -42,24 +45,53 @@ class SimulatorGUI:
 
         # Problem Selection
         ttk.Label(control_frame, text="Problem:").pack(anchor=tk.W, pady=(0, 2))
-        self.problem_var = tk.StringVar(value="p01")
-        problems = [f"p{i:02d}" for i in range(1, 31)]
+        problems = sorted(p.stem for p in TRUCKS_DIR.glob("*.pddl") if p.name != "domain.pddl") or [f"p{i:02d}" for i in range(1, 31)]
+        self.problem_var = tk.StringVar(value="p01" if "p01" in problems else problems[0])
         self.problem_combo = ttk.Combobox(control_frame, textvariable=self.problem_var, values=problems, state="readonly")
         self.problem_combo.pack(fill=tk.X, pady=(0, 15))
+        self.problem_combo.bind("<<ComboboxSelected>>", lambda e: self.plan_var.set(str(Path("plans") / f"{self.problem_var.get()}.plan")))
 
-        # Anomaly Chance
-        ttk.Label(control_frame, text="Anomaly Chance (0.0 - 1.0):").pack(anchor=tk.W, pady=(0, 2))
-        self.chance_var = tk.DoubleVar(value=0.3)
-        chance_scale = ttk.Scale(control_frame, from_=0.0, to=1.0, variable=self.chance_var, command=self._update_chance_label)
-        chance_scale.pack(fill=tk.X)
-        self.chance_label = ttk.Label(control_frame, text="30%")
-        self.chance_label.pack(anchor=tk.E, pady=(0, 15))
+        # Plan source: load a pre-made plan file, or generate one with Fast Downward
+        ttk.Label(control_frame, text="Initial Plan:").pack(anchor=tk.W, pady=(0, 2))
+        self.plan_source_var = tk.StringVar(value="load")
+        source_frame = ttk.Frame(control_frame)
+        source_frame.pack(fill=tk.X)
+        ttk.Radiobutton(source_frame, text="Load plan file", value="load", variable=self.plan_source_var,
+                        command=self._update_plan_widgets).pack(side=tk.LEFT)
+        ttk.Radiobutton(source_frame, text="Generate", value="generate", variable=self.plan_source_var,
+                        command=self._update_plan_widgets).pack(side=tk.LEFT, padx=(10, 0))
 
-        # Seed
+        self.plan_var = tk.StringVar(value=str(Path("plans") / f"{self.problem_var.get()}.plan"))
+        self.plan_entry = ttk.Entry(control_frame, textvariable=self.plan_var)
+        self.plan_entry.pack(fill=tk.X, pady=(4, 2))
+        self.save_plan_var = tk.BooleanVar(value=False)
+        self.save_plan_check = ttk.Checkbutton(control_frame, text="Save generated plan to plans/", variable=self.save_plan_var)
+        self.save_plan_check.pack(anchor=tk.W, pady=(0, 15))
+
+        # Deterministic anomaly input
+        ttk.Label(control_frame, text="Anomaly ID (Optional):").pack(anchor=tk.W, pady=(0, 2))
+        self.anomaly_id_var = tk.StringVar(value="")
+        ttk.Entry(control_frame, textvariable=self.anomaly_id_var).pack(fill=tk.X, pady=(0, 2))
+        ttk.Label(control_frame, text="1=road, 2=truck, 3=new delivery, 4=deadline", font=("Segoe UI", 8, "italic")).pack(anchor=tk.W)
+
+        ttk.Label(control_frame, text="Step ID (Optional):").pack(anchor=tk.W, pady=(8, 2))
+        self.step_id_var = tk.StringVar(value="")
+        ttk.Entry(control_frame, textvariable=self.step_id_var).pack(fill=tk.X)
+
+        ttk.Label(control_frame, text="Anomaly Arguments:").pack(anchor=tk.W, pady=(8, 2))
+        self.anomaly_args_var = tk.StringVar(value="")
+        ttk.Entry(control_frame, textvariable=self.anomaly_args_var).pack(fill=tk.X, pady=(0, 15))
+
+        # Random anomalies (off at 0%)
+        ttk.Label(control_frame, text="Random Anomaly Chance (0.0 - 1.0):").pack(anchor=tk.W, pady=(0, 2))
+        self.chance_var = tk.DoubleVar(value=0.0)
+        ttk.Scale(control_frame, from_=0.0, to=1.0, variable=self.chance_var, command=self._update_chance_label).pack(fill=tk.X)
+        self.chance_label = ttk.Label(control_frame, text="0%")
+        self.chance_label.pack(anchor=tk.E)
+
         ttk.Label(control_frame, text="Random Seed (Optional):").pack(anchor=tk.W, pady=(0, 2))
         self.seed_var = tk.StringVar(value="")
-        ttk.Entry(control_frame, textvariable=self.seed_var).pack(fill=tk.X, pady=(0, 2))
-        ttk.Label(control_frame, text="Leave empty for random sequence.", font=("Segoe UI", 8, "italic")).pack(anchor=tk.W, pady=(0, 15))
+        ttk.Entry(control_frame, textvariable=self.seed_var).pack(fill=tk.X, pady=(0, 15))
 
         # Search Type
         ttk.Label(control_frame, text="Fast Downward Search:").pack(anchor=tk.W, pady=(0, 2))
@@ -86,11 +118,9 @@ class SimulatorGUI:
         self.python_var = tk.StringVar(value=DEFAULT_PYTHON)
         ttk.Entry(control_frame, textvariable=self.python_var).pack(fill=tk.X, pady=(0, 15))
 
-        # Fast Downward Path
-        ttk.Label(control_frame, text="Fast Downward Path (optional):").pack(anchor=tk.W, pady=(0, 2))
-        self.fd_var = tk.StringVar(value=self._load_fd_path())
-        ttk.Entry(control_frame, textvariable=self.fd_var).pack(fill=tk.X, pady=(0, 2))
-        ttk.Label(control_frame, text="Folder containing fast-downward.py + src/translate. Saved to fd_config.json.", font=("Segoe UI", 8, "italic")).pack(anchor=tk.W, pady=(0, 15))
+        ttk.Label(control_frame, text="Fast Downward Path (Optional):").pack(anchor=tk.W, pady=(0, 2))
+        self.fast_downward_var = tk.StringVar(value="")
+        ttk.Entry(control_frame, textvariable=self.fast_downward_var).pack(fill=tk.X, pady=(0, 15))
 
         # Buttons
         self.run_btn = ttk.Button(control_frame, text="▶ Run Simulation", command=self.run_simulation, style="Accent.TButton")
@@ -143,30 +173,16 @@ class SimulatorGUI:
         style = ttk.Style()
         style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"))
         self._last_state_data = None
-
-    def _load_fd_path(self):
-        """Read the saved Fast Downward path from fd_config.json."""
-        try:
-            cfg_path = Path(__file__).resolve().parent / "fd_config.json"
-
-            if cfg_path.exists():
-                cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-                return str(cfg.get("fast_downward_dir") or "")
-        except Exception:
-            pass
-
-        return ""
-
-    def _save_fd_path(self, fd_path: str):
-        """Persist the Fast Downward path to fd_config.json (used by planner.py)."""
-        try:
-            cfg_path = Path(__file__).resolve().parent / "fd_config.json"
-            cfg_path.write_text(json.dumps({"fast_downward_dir": fd_path}, indent=2), encoding="utf-8")
-        except Exception as e:
-            self.log(f"\n[Could not save fd_config.json: {e}]\n")
+        self._update_plan_widgets()
 
     def _update_chance_label(self, val):
         self.chance_label.config(text=f"{float(val):.0%}")
+
+    def _update_plan_widgets(self):
+        """Enable the plan-file box in Load mode and the save option in Generate mode."""
+        loading = self.plan_source_var.get() == "load"
+        self.plan_entry.config(state=tk.NORMAL if loading else tk.DISABLED)
+        self.save_plan_check.config(state=tk.DISABLED if loading else tk.NORMAL)
 
     def log(self, message):
         self.output_queue.put(message)
@@ -246,6 +262,11 @@ class SimulatorGUI:
             
         self.root.after(50, self._start_queue_checker)
 
+    # ------------------------------------------------------------------
+    # Map drawing: grid layout (1 cell = 1 mile) when the problem has
+    # coordinates, otherwise the original circle layout.
+    # ------------------------------------------------------------------
+
     def _draw_map_if_data(self):
         if not self._last_state_data:
             return
@@ -260,332 +281,195 @@ class SimulatorGUI:
 
         grid = data.get("grid") or {}
         grid_locs = grid.get("locations") or {}
+        locs = data.get("locations", [])
+        if not locs:
+            return
 
-        if grid_locs:
-            self._draw_grid_map(data, width, height, grid_locs)
+        if grid_locs and len(grid_locs) == len(locs):
+            coords, to_px = self._grid_layout(grid, grid_locs, width, height)
         else:
-            self._draw_circle_map(data, width, height)
+            coords, to_px = self._circle_layout(locs, width, height), None
 
-        self._draw_hud(data)
+        self._draw_roads(data, coords)
+        node_radius = 18
+        self._draw_locations(data, coords, node_radius)
+        self._draw_packages(data, coords, node_radius)
+        self._draw_trucks(data, coords, to_px, node_radius)
+        self._draw_hud(data, width)
 
-    # ------------------------------------------------------------------
-    # Grid map (1 cell = 1 mile)
-    # ------------------------------------------------------------------
-
-    def _draw_grid_map(self, data, width, height, grid_locs):
-        grid = data.get("grid") or {}
+    def _grid_layout(self, grid, grid_locs, width, height):
         gw = max(1, grid.get("width") or 1)
         gh = max(1, grid.get("height") or 1)
-
-        margin_left, margin_top, margin_bottom = 50, 120, 40
-        cell = min((width - margin_left - 30) / gw, (height - margin_top - margin_bottom) / gh)
-        cell = max(cell, 8)
+        margin_top, margin_bottom = 120, 30
+        cell = min((width - 60) / gw, (height - margin_top - margin_bottom) / gh)
+        cell = max(cell, 3)
         ox = (width - cell * gw) / 2
         oy = margin_top + (height - margin_top - margin_bottom - cell * gh) / 2
 
         def to_px(x, y):
             return (ox + (x + 0.5) * cell, oy + (y + 0.5) * cell)
 
-        # Grid lines: each cell is 1 mile
-        for i in range(gw + 1):
+        # Grid lines: each cell is 1 mile (every 5th line on large maps)
+        step = 5 if max(gw, gh) > 80 else 1
+        for i in range(0, gw + 1, step):
             self.canvas.create_line(ox + i * cell, oy, ox + i * cell, oy + gh * cell, fill="#2b2b2b")
-
-        for j in range(gh + 1):
+        for j in range(0, gh + 1, step):
             self.canvas.create_line(ox, oy + j * cell, ox + gw * cell, oy + j * cell, fill="#2b2b2b")
 
-        coords = {loc: to_px(x, y) for loc, (x, y) in grid_locs.items()}
+        return {loc: to_px(x, y) for loc, (x, y) in grid_locs.items()}, to_px
 
-        # Current connections (undirected view for drawing)
-        current_edges = {
-            tuple(sorted([c1, c2]))
-            for c1, c2 in data.get("connections", [])
-            if c1 in coords and c2 in coords
-        }
-
-        if not hasattr(self, 'all_known_connections'):
-            self.all_known_connections = set()
-        self.all_known_connections.update(current_edges)
-
-        # Road metadata keyed by undirected pair
-        road_meta = {}
-
-        for r in data.get("roads", []):
-            a, b = r.get("from"), r.get("to")
-
-            if a in coords and b in coords:
-                road_meta[tuple(sorted([a, b]))] = r
-
-        # Roads with distance/speed labels
-        for pair in self.all_known_connections:
-            if pair[0] not in coords or pair[1] not in coords:
-                continue
-
-            x1, y1 = coords[pair[0]]
-            x2, y2 = coords[pair[1]]
-
-            if pair in current_edges:
-                self.canvas.create_line(x1, y1, x2, y2, fill="#7f8c8d", width=3)
-                meta = road_meta.get(pair)
-
-                if meta:
-                    mid_x, mid_y = (x1 + x2) / 2, (y1 + y2) / 2
-                    label = f"{meta['distance']}mi @ {meta['speed']}mph = {meta['duration']}t"
-                    self.canvas.create_text(
-                        mid_x, mid_y - 11, text=label,
-                        fill="#aab7b8", font=("Segoe UI", 8)
-                    )
-            else:
-                self.canvas.create_line(x1, y1, x2, y2, fill="#e74c3c", width=5)
-                mid_x, mid_y = (x1 + x2) / 2, (y1 + y2) / 2
-                self.canvas.create_text(mid_x, mid_y, text="\u274c", fill="#ffdddd", font=("Segoe UI", 14))
-
-        # Locations
-        node_radius = 18
-
-        for loc, (x, y) in coords.items():
-            self.canvas.create_oval(
-                x - node_radius, y - node_radius, x + node_radius, y + node_radius,
-                fill="#2c3e50", outline="#ecf0f1", width=2
-            )
-            self.canvas.create_text(x, y, text=loc, fill="#ecf0f1", font=("Segoe UI", 10, "bold"))
-
-        # Trucks at interpolated grid positions
-        truck_positions = data.get("truck_positions") or {}
-        trucks = data.get("trucks", {})
-        cargo = data.get("cargo", [])
-        truck_cargo = {}
-
-        for c in cargo:
-            truck_cargo.setdefault(c.get("truck"), []).append(c["package"])
-
-        # Group trucks that are parked at the same location so they can be
-        # fanned out horizontally instead of drawing on top of each other.
-        parked_at_loc = {}
-
-        for tname, pos in truck_positions.items():
-            if pos.get("x") is None or pos.get("y") is None or not pos.get("road"):
-                loc = pos.get("location") or trucks.get(tname)
-
-                if loc is not None:
-                    parked_at_loc.setdefault(loc, []).append(tname)
-
-        loc_fanout = {}
-
-        for loc, tnames in parked_at_loc.items():
-            for i, tname in enumerate(tnames):
-                loc_fanout[tname] = (i - (len(tnames) - 1) / 2) * 46
-
-        for tname, pos in truck_positions.items():
-            if pos.get("x") is None or pos.get("y") is None:
-                loc = trucks.get(tname)
-
-                if loc not in coords:
-                    continue
-
-                x, y = coords[loc]
-                x = x + loc_fanout.get(tname, 0)
-                y = y + node_radius + 15
-            else:
-                x, y = to_px(pos["x"], pos["y"])
-
-            self.canvas.create_rectangle(
-                x - 22, y - 11, x + 22, y + 11,
-                fill="#e74c3c", outline="#c0392b"
-            )
-            self.canvas.create_text(x, y, text=tname, fill="white", font=("Segoe UI", 8, "bold"))
-
-            c_list = truck_cargo.get(tname, [])
-
-            if c_list:
-                self.canvas.create_text(
-                    x, y + 20, text=f"\U0001F4E6x{len(c_list)}",
-                    fill="#f1c40f", font=("Segoe UI", 8)
-                )
-
-            if pos.get("road"):
-                d = pos.get("distance")
-                s = pos.get("speed")
-                mc = pos.get("miles_covered")
-
-                if d is not None and s is not None and mc is not None:
-                    prog = f"{mc:.0f}/{d}mi @ {s}mph"
-                else:
-                    prog = f"{pos.get('fraction', 0):.0%}"
-
-                self.canvas.create_text(
-                    x, y - 19, text=prog,
-                    fill="#f1c40f", font=("Segoe UI", 8, "bold")
-                )
-
-        # Un-delivered packages waiting at locations
-        packages = data.get("packages_at_locations", {})
-        loc_pkgs = {}
-
-        for p, loc in packages.items():
-            loc_pkgs.setdefault(loc, []).append(p)
-
-        for loc, lst in loc_pkgs.items():
-            if loc not in coords:
-                continue
-
-            x, y = coords[loc]
-            self.canvas.create_oval(
-                x + node_radius, y - node_radius - 10, x + node_radius + 20, y - node_radius + 10,
-                fill="#f39c12", outline="#d35400"
-            )
-            self.canvas.create_text(
-                x + node_radius + 10, y - node_radius,
-                text=str(len(lst)), fill="white", font=("Segoe UI", 8, "bold")
-            )
-
-        # Delivered packages at locations
-        delivered = data.get("delivered", [])
-        loc_delivered = {}
-
-        for d in delivered:
-            loc_delivered.setdefault(d["location"], []).append(d["package"])
-
-        for loc, lst in loc_delivered.items():
-            if loc not in coords:
-                continue
-
-            x, y = coords[loc]
-            self.canvas.create_oval(
-                x - node_radius - 28, y - node_radius - 10, x - node_radius - 2, y - node_radius + 10,
-                fill="#27ae60", outline="#2ecc71"
-            )
-            self.canvas.create_text(
-                x - node_radius - 15, y - node_radius,
-                text="\u2705" + str(len(lst)), fill="white", font=("Segoe UI", 8)
-            )
-
-    # ------------------------------------------------------------------
-    # Legacy circular map (problems without grid coordinates)
-    # ------------------------------------------------------------------
-
-    def _draw_circle_map(self, data, width, height):
-        center_x, center_y = width / 2, height / 2
-        radius = min(width, height) / 2 * 0.75
-
-        locs = data.get("locations", [])
-        if not locs:
-            return
-
+    def _circle_layout(self, locs, width, height):
+        center_x, center_y = width / 2, height / 2 + 30
+        radius = min(width, height - 60) / 2 * 0.72
         locs = sorted(locs, key=lambda x: int(x[1:]) if x[1:].isdigit() else 0)
-
         coords = {}
         for i, loc in enumerate(locs):
             angle = (i / len(locs)) * 2 * math.pi - math.pi / 2
-            x = center_x + radius * math.cos(angle)
-            y = center_y + radius * math.sin(angle)
-            coords[loc] = (x, y)
+            coords[loc] = (center_x + radius * math.cos(angle), center_y + radius * math.sin(angle))
+        return coords
 
-        connections = data.get("connections", [])
-        current_edges = {tuple(sorted([c1, c2])) for c1, c2 in connections if c1 in coords and c2 in coords}
+    def _draw_roads(self, data, coords):
+        # Road metadata (distance/speed/time and closed flag) keyed by undirected pair
+        roads = {tuple(sorted([r["from"], r["to"]])): r for r in data.get("roads", [])}
+        if not roads:                                   # older snapshots: derive roads from connections
+            if not hasattr(self, "all_known_connections"):
+                self.all_known_connections = set()
+            current = {tuple(sorted(c)) for c in data.get("connections", [])}
+            self.all_known_connections.update(current)
+            roads = {pair: {"closed": pair not in current} for pair in self.all_known_connections}
 
-        if not hasattr(self, 'all_known_connections'):
-            self.all_known_connections = set()
-        self.all_known_connections.update(current_edges)
+        moving = {tuple(sorted(p["road"])) for p in (data.get("truck_positions") or {}).values() if p.get("road")}
 
-        for c1, c2 in self.all_known_connections:
-            x1, y1 = coords[c1]
-            x2, y2 = coords[c2]
-            if (c1, c2) in current_edges:
-                self.canvas.create_line(x1, y1, x2, y2, fill="#7f8c8d", width=3, dash=(6, 4))
-            else:
-                self.canvas.create_line(x1, y1, x2, y2, fill="#e74c3c", width=5)
-                mid_x = (x1 + x2) / 2
-                mid_y = (y1 + y2) / 2
-                self.canvas.create_text(mid_x, mid_y, text="\u274c", fill="#ffdddd", font=("Segoe UI", 14))
+        for pair, meta in roads.items():
+            if pair[0] not in coords or pair[1] not in coords:
+                continue
+            x1, y1 = coords[pair[0]]
+            x2, y2 = coords[pair[1]]
+            mid_x, mid_y = (x1 + x2) / 2, (y1 + y2) / 2
 
-        node_radius = 20
+            if meta.get("closed"):
+                self.canvas.create_line(x1, y1, x2, y2, fill="#e74c3c", width=5, dash=(8, 6))
+                self.canvas.create_text(mid_x, mid_y, text="❌", fill="#ffdddd", font=("Segoe UI", 14))
+                continue
+
+            active = pair in moving
+            self.canvas.create_line(x1, y1, x2, y2, fill="#4da3ff" if active else "#7f8c8d", width=4 if active else 3)
+            if meta.get("distance") is not None and not active:
+                label = f"{meta['distance']}mi @ {meta['speed']}mph = {meta['duration']}t"
+                self.canvas.create_text(mid_x, mid_y - 11, text=label, fill="#aab7b8", font=("Segoe UI", 8))
+
+    def _draw_locations(self, data, coords, node_radius):
+        trucks_here = set((data.get("trucks") or {}).values())
         for loc, (x, y) in coords.items():
             self.canvas.create_oval(
                 x - node_radius, y - node_radius, x + node_radius, y + node_radius,
-                fill="#2c3e50", outline="#ecf0f1", width=2
+                fill="#2c3e50", outline="#4da3ff" if loc in trucks_here else "#ecf0f1", width=3 if loc in trucks_here else 2
             )
             self.canvas.create_text(x, y, text=loc, fill="#ecf0f1", font=("Segoe UI", 10, "bold"))
 
-        trucks = data.get("trucks", {})
-        loc_trucks = {}
-        for t, loc in trucks.items():
-            loc_trucks.setdefault(loc, []).append(t)
+    def _draw_packages(self, data, coords, node_radius):
+        # Waiting packages: orange badge (top right). Delivered: green badge (top left).
+        loc_pkgs, loc_delivered = {}, {}
+        for p, loc in (data.get("packages_at_locations") or {}).items():
+            loc_pkgs.setdefault(loc, []).append(p)
+        for d in data.get("delivered", []):
+            loc_delivered.setdefault(d["location"], []).append(d["package"])
 
-        cargo = data.get("cargo", [])
+        for loc, lst in loc_pkgs.items():
+            if loc in coords:
+                x, y = coords[loc]
+                self.canvas.create_oval(x + node_radius, y - node_radius - 10, x + node_radius + 20, y - node_radius + 10,
+                                        fill="#f39c12", outline="#d35400")
+                self.canvas.create_text(x + node_radius + 10, y - node_radius, text=str(len(lst)),
+                                        fill="white", font=("Segoe UI", 8, "bold"))
+
+        for loc, lst in loc_delivered.items():
+            if loc in coords:
+                x, y = coords[loc]
+                self.canvas.create_oval(x - node_radius - 28, y - node_radius - 10, x - node_radius - 2, y - node_radius + 10,
+                                        fill="#27ae60", outline="#2ecc71")
+                self.canvas.create_text(x - node_radius - 15, y - node_radius, text="✅" + str(len(lst)),
+                                        fill="white", font=("Segoe UI", 8))
+
+    def _draw_trucks(self, data, coords, to_px, node_radius):
+        trucks = data.get("trucks") or {}
+        positions = data.get("truck_positions") or {name: {"location": loc} for name, loc in trucks.items()}
         truck_cargo = {}
-        for c in cargo:
+        for c in data.get("cargo", []):
             truck_cargo.setdefault(c.get("truck"), []).append(c["package"])
 
-        for loc, v in loc_trucks.items():
-            if loc not in coords:
-                continue
-            x, y = coords[loc]
-            offset_y = node_radius + 15
-            for i, t in enumerate(v):
-                tx = x + (i * 45) - (len(v) * 20) + 20
-                ty = y + offset_y
-                self.canvas.create_rectangle(
-                    tx - 20, ty - 10, tx + 20, ty + 10,
-                    fill="#e74c3c", outline="#c0392b"
-                )
-                self.canvas.create_text(tx, ty, text=t, fill="white", font=("Segoe UI", 7, "bold"))
+        # Parked trucks at the same location are fanned out side by side.
+        parked = {}
+        for name, pos in positions.items():
+            if not pos.get("road"):
+                parked.setdefault(pos.get("location") or trucks.get(name), []).append(name)
+        fanout = {name: (i - (len(names) - 1) / 2) * 46 for names in parked.values() for i, name in enumerate(sorted(names))}
 
-                c_list = truck_cargo.get(t, [])
-                if c_list:
-                    self.canvas.create_text(
-                        tx, ty + 18, text=f"\U0001F4E6x{len(c_list)}",
-                        fill="#f1c40f", font=("Segoe UI", 8)
-                    )
+        for name, pos in positions.items():
+            road = pos.get("road")
+            if road and road[0] in coords and road[1] in coords:
+                if to_px and pos.get("x") is not None:
+                    x, y = to_px(pos["x"], pos["y"])
+                else:                                    # circle layout: interpolate along the drawn road
+                    (x1, y1), (x2, y2) = coords[road[0]], coords[road[1]]
+                    f = pos.get("fraction", 0)
+                    x, y = x1 + (x2 - x1) * f, y1 + (y2 - y1) * f
+            else:
+                loc = pos.get("location") or trucks.get(name)
+                if loc not in coords:
+                    continue
+                x, y = coords[loc]
+                x, y = x + fanout.get(name, 0), y + node_radius + 15
 
-    # ------------------------------------------------------------------
-    # HUD overlay (time + goals)
-    # ------------------------------------------------------------------
+            self.canvas.create_rectangle(x - 22, y - 11, x + 22, y + 11, fill="#e74c3c", outline="#c0392b")
+            self.canvas.create_text(x, y, text=name, fill="white", font=("Segoe UI", 8, "bold"))
 
-    def _draw_hud(self, data):
+            c_list = truck_cargo.get(name, [])
+            if c_list:
+                self.canvas.create_text(x, y + 20, text=f"\U0001F4E6x{len(c_list)}", fill="#f1c40f", font=("Segoe UI", 8))
+
+            if road:
+                d, s, mc = pos.get("distance"), pos.get("speed"), pos.get("miles_covered")
+                prog = f"{mc:.0f}/{d}mi @ {s}mph" if None not in (d, s, mc) else f"{pos.get('fraction', 0):.0%}"
+                self.canvas.create_text(x, y - 19, text=prog, fill="#f1c40f", font=("Segoe UI", 8, "bold"))
+
+        for name in data.get("broken_trucks", []):
+            self.canvas.create_text(20, self.canvas.winfo_height() - 20, anchor=tk.SW,
+                                    text=f"{name}: broken down", fill="#e74c3c", font=("Segoe UI", 9, "bold"))
+
+    def _draw_hud(self, data, width):
         current_time_str = data.get("current_time", "t?")
         hour = data.get("hour")
-        hour_txt = f"  ({hour} hr)" if hour is not None else ""
-        self.canvas.create_text(
-            20, 20, anchor=tk.NW,
-            text=f"Current Time:  {current_time_str}{hour_txt}",
-            fill="#f1c40f", font=("Courier", 16, "bold")
-        )
-        self.canvas.create_text(
-            20, 45, anchor=tk.NW,
-            text="Grid: 1 cell = 1 mile  |  roads labeled: distance @ speed = travel time",
-            fill="#95a5a6", font=("Segoe UI", 9)
-        )
+        hour_txt = f"  (hour {hour})" if hour is not None else ""
+        self.canvas.create_text(20, 20, anchor=tk.NW, text=f"Current Time:  {current_time_str}{hour_txt}",
+                                fill="#f1c40f", font=("Courier", 16, "bold"))
+        if (data.get("grid") or {}).get("locations"):
+            self.canvas.create_text(20, 45, anchor=tk.NW,
+                                    text="Grid: 1 cell = 1 mile  |  roads: distance @ speed = travel time",
+                                    fill="#95a5a6", font=("Segoe UI", 9))
+        last = data.get("last_action")
+        if last:
+            self.canvas.create_text(20, 65, anchor=tk.NW, text=last, fill="#4da3ff", font=("Consolas", 10))
 
         goals = data.get("goals", [])
         if goals:
-            self.canvas.create_text(
-                width - 20, 70, anchor=tk.NE, text="Delivery Goals:",
-                fill="#ecf0f1", font=("Segoe UI", 12, "bold")
-            )
-            y_offset = 95
-            delivered = data.get("delivered", [])
-            deliv_pkgs = {d["package"] for d in delivered}
+            self.canvas.create_text(width - 20, 20, anchor=tk.NE, text="Delivery Goals:",
+                                    fill="#ecf0f1", font=("Segoe UI", 12, "bold"))
+            y_offset = 45
+            deliv_pkgs = {d["package"] for d in data.get("delivered", [])}
 
             for g in goals:
-                pred = g.get("predicate", "")
                 args = g.get("arguments", [])
-
-                if pred == "delivered" and len(args) == 3:
-                    pkg, loc, deadline = args
-                    is_deliv = pkg in deliv_pkgs
-                    color = "#27ae60" if is_deliv else "#bdc3c7"
-                    chk = "\u2705" if is_deliv else "\u23f3"
-                    txt = f"{chk} {pkg} \u2794 {loc}  (by {deadline})"
-                    self.canvas.create_text(width - 20, y_offset, anchor=tk.NE, text=txt, fill=color, font=("Segoe UI", 10))
-                    y_offset += 20
-                elif pred == "at-destination" and len(args) == 2:
-                    pkg, loc = args
-                    is_deliv = pkg in deliv_pkgs
-                    color = "#27ae60" if is_deliv else "#bdc3c7"
-                    chk = "\u2705" if is_deliv else "\u23f3"
-                    txt = f"{chk} {pkg} \u2794 {loc}  (no deadline)"
-                    self.canvas.create_text(width - 20, y_offset, anchor=tk.NE, text=txt, fill=color, font=("Segoe UI", 10))
-                    y_offset += 20
+                if len(args) < 2:
+                    continue
+                pkg, loc = args[0], args[1]
+                deadline = f"by {args[2]}" if len(args) > 2 else "no deadline"
+                is_deliv = pkg in deliv_pkgs
+                icon = "✅" if is_deliv else "⏳"     # kept outside the f-string so Python 3.9-3.11 can run it
+                txt = f"{icon} {pkg} ➔ {loc}  ({deadline})"
+                self.canvas.create_text(width - 20, y_offset, anchor=tk.NE, text=txt,
+                                        fill="#27ae60" if is_deliv else "#bdc3c7", font=("Segoe UI", 10))
+                y_offset += 20
 
     def run_simulation(self):
         if self.process and self.process.poll() is None:
@@ -593,19 +477,36 @@ class SimulatorGUI:
             return
 
         problem = self.problem_var.get().strip()
-        chance = self.chance_var.get()
-        seed = self.seed_var.get().strip()
+        plan = self.plan_var.get().strip()
+        anomaly_id = self.anomaly_id_var.get().strip()
+        step_id = self.step_id_var.get().strip()
+        anomaly_args = self.anomaly_args_var.get().split()
         verbose = self.verbose_var.get()
         python_exe = self.python_var.get().strip()
+        fast_downward = self.fast_downward_var.get().strip()
+
+        if plan and not os.path.isabs(plan):
+            plan = str(PROJECT_DIR / plan)                 # plans/p01.plan is relative to the project folder
 
         if not os.path.exists(python_exe):
             messagebox.showerror("Error", f"Python executable not found at:\n{python_exe}\n\nPlease check the path.")
             return
 
-        search = self.search_var.get().strip()
+        loading = self.plan_source_var.get() == "load"
+        if loading and not os.path.isfile(plan):
+            messagebox.showerror("Error", f"Plan file not found at:\n{plan}\n\nChoose 'Generate' to plan with Fast Downward instead.")
+            return
 
-        # Persist the Fast Downward path (if any) so planner.py picks it up
-        self._save_fd_path(self.fd_var.get().strip())
+        seed = self.seed_var.get().strip()
+        if seed and not seed.isdigit():
+            messagebox.showerror("Error", "Random seed must be a whole number (or empty).")
+            return
+
+        if bool(anomaly_id) != bool(step_id):
+            messagebox.showerror("Error", "Anomaly ID and Step ID must be entered together.")
+            return
+
+        search = self.search_var.get().strip()
 
         # Switch to Map Tab automatically
         self.notebook.select(self.map_tab)
@@ -624,9 +525,23 @@ class SimulatorGUI:
         self.canvas.delete("all")
 
         # Use -u to force unbuffered output so we get live updates in the UI
-        cmd = [python_exe, "-u", "main.py", "--problem", problem, "--anomaly-chance", str(chance), "--search", search, "--json-output"]
-        if seed:
-            cmd.extend(["--seed", seed])
+        cmd = [python_exe, "-u", "main.py", "--problem", problem, "--search", search, "--json-output"]
+        chance = round(self.chance_var.get(), 2)
+        if chance > 0:
+            cmd.extend(["--anomaly-chance", str(chance)])
+            if seed:
+                cmd.extend(["--seed", seed])
+        if loading:
+            cmd.extend(["--plan", plan])
+        elif self.save_plan_var.get():
+            cmd.append("--save-plan")
+        if fast_downward:
+            cmd.extend(["--fast-downward", fast_downward])
+        if anomaly_id:
+            cmd.extend(["--anomaly-id", anomaly_id, "--step-id", step_id])
+            if anomaly_args:
+                cmd.append("--anomaly-args")
+                cmd.extend(anomaly_args)
         if not verbose:
             cmd.append("--quiet")
             
@@ -653,7 +568,8 @@ class SimulatorGUI:
                     bufsize=1,
                     env=env,
                     encoding='utf-8',
-                    errors='replace'
+                    errors='replace',
+                    cwd=str(PROJECT_DIR),                  # main.py and plans/ are found no matter where the GUI was started
                 )
 
                 for line in self.process.stdout:

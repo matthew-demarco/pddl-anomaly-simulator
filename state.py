@@ -2,7 +2,12 @@
 World State Management for the Trucks Domain Simulation.
 
 Maintains the mutable world state during plan execution and provides
-action-application logic for the four domain actions: drive, load, unload, deliver.
+action-application logic for the domain actions: drive, drive-instant,
+load, unload, deliver.
+
+Roads carry a distance (miles) and speed (mph); travel time is
+distance / speed rounded half-up to whole hours (t steps). Problems without
+road data fall back to the original behavior of 1t per drive.
 """                                                                         # Module docstring explaining that this file stores the changing simulation state and applies plan actions.
 
 
@@ -84,20 +89,6 @@ class WorldState:                                                           # De
     # All truck areas
     all_areas: List[str] = field(default_factory=list)                      # Stores every truck cargo-area object.
 
-    def road_duration(self, from_loc: str, to_loc: str) -> int:              # Defines a method computing a road's rounded travel time in hours.
-        """Return the rounded travel time (in whole hours/ticks) for a road.
-
-        Round-half-up, no minimum: 35mi@30mph -> 1t, 85mi@30mph -> 3t,
-        45mi@30mph -> 2t, 10mi@30mph -> 0t (instant hop).
-        """
-        d = self.road_distance.get((from_loc, to_loc))                     # Gets the road's distance in miles.
-        s = self.road_speed.get((from_loc, to_loc))                        # Gets the road's speed in mph.
-
-        if d is None or s is None or s <= 0:
-            return 1  # Legacy problem without road metrics: keep the old 1t-per-drive behavior.
-
-        return (2 * d + s) // (2 * s)                                     # Computes floor(d/s + 0.5), i.e. round-half-up.
-
     # Road distance in integer miles: (from_loc, to_loc) -> miles
     road_distance: Dict[Tuple[str, str], int] = field(default_factory=dict)  # Stores each directed road's length in whole miles.
 
@@ -108,242 +99,329 @@ class WorldState:                                                           # De
     loc_x: Dict[str, int] = field(default_factory=dict)                     # Stores each location's horizontal grid coordinate.
     loc_y: Dict[str, int] = field(default_factory=dict)                     # Stores each location's vertical grid coordinate.
 
-    def copy(self) -> 'WorldState':                                         # Defines a method that returns an independent copy of the current state.
-        """Return a deep copy of this state."""                             # Method docstring explaining that nested collections are also copied.
-        return deepcopy(self)                                               # Creates and returns a copy whose data can be changed without affecting the original state.
+    def road_duration(self, from_loc: str, to_loc: str) -> int:              # Computes a road's rounded travel time in hours.
+        """Return the rounded travel time (in whole hours/ticks) for a road.
 
-    def get_next_time(self) -> Optional[str]:                               # Defines a method that returns the time step immediately after current_time.
-        """Return the time step after the current one, or None if at the end."""  # Method docstring explaining the return value.
+        Round-half-up, no minimum: 35mi@30mph -> 1t, 85mi@30mph -> 3t,
+        45mi@30mph -> 2t, 10mi@30mph -> 0t (instant hop).
+        Roads without metrics (original problems) count as 1t.
+        """
+        d = self.road_distance.get((from_loc, to_loc))                     # Gets the road's distance in miles.
+        s = self.road_speed.get((from_loc, to_loc))                        # Gets the road's speed in mph.
 
-        try:                                                                # Attempts to find current_time inside the ordered time-step list.
-            idx = self.time_steps.index(self.current_time)                  # Stores the numerical position of current_time in time_steps.
+        if d is None or s is None or s <= 0:
+            return 1                                                       # Legacy problem without road metrics: keep 1t per drive.
 
-            if idx + 1 < len(self.time_steps):                              # Checks whether another time step exists after the current one.
-                return self.time_steps[idx + 1]                             # Returns the next chronological time step.
+        return (2 * d + s) // (2 * s)                                     # floor(d/s + 0.5), i.e. round-half-up, using integers only.
 
-        except ValueError:                                                  # Handles the case where current_time is not found in time_steps.
-            pass                                                            # Does nothing and allows the method to return None.
+    def has_road_metrics(self) -> bool:                                     # Reports whether the problem carries distance/speed data.
+        """True when at least one road has a distance and a speed."""
+        return bool(self.road_distance) and bool(self.road_speed)
 
-        return None                                                         # Returns None if there is no next time or the current time could not be found.
+    def copy(self) -> 'WorldState':                                         # Returns an independent copy of the current state.
+        """Return a deep copy of this state."""
+        return deepcopy(self)
 
-    def get_remaining_time_steps(self) -> List[str]:                        # Defines a method that returns current_time and every later time step.
-        """Return time steps from current_time onward (inclusive)."""       # Method docstring explaining that the current time is included.
+    def get_next_time(self) -> Optional[str]:                               # Returns the time step immediately after current_time.
+        """Return the time step after the current one, or None if at the end."""
 
-        try:                                                                # Attempts to locate current_time inside the time-step list.
-            idx = self.time_steps.index(self.current_time)                  # Stores the position of current_time.
-            return self.time_steps[idx:]                                    # Returns a slice beginning at current_time and continuing to the end.
+        try:
+            idx = self.time_steps.index(self.current_time)
 
-        except ValueError:                                                  # Handles the case where current_time is missing from time_steps.
-            return self.time_steps                                          # Returns the complete list as a fallback.
+            if idx + 1 < len(self.time_steps):
+                return self.time_steps[idx + 1]
+
+        except ValueError:
+            pass
+
+        return None
+
+    def get_remaining_time_steps(self) -> List[str]:                        # Returns current_time and every later time step.
+        """Return time steps from current_time onward (inclusive)."""
+
+        try:
+            idx = self.time_steps.index(self.current_time)
+            return self.time_steps[idx:]
+
+        except ValueError:
+            return self.time_steps
 
 
 # ---------------------------------------------------------------------------
 # Initialization
 # ---------------------------------------------------------------------------
 
-def initialize_from_problem(problem: PddlProblem) -> WorldState:            # Defines a function that converts a parsed PDDL problem into the simulator's starting state.
-    """Build an initial WorldState from a parsed PDDL problem."""            # Function docstring explaining its purpose.
+def _time_key(t: str) -> int:                                               # Sort key for time names: t0, t1, t2, ...
+    return int(t[1:]) if t[1:].isdigit() else 0
 
-    state = WorldState()                                                    # Creates a new WorldState with empty collections and default values.
-    state.objects = deepcopy(problem.objects)                               # Copies the parsed PDDL object dictionary into the state.
+
+def initialize_from_problem(problem: PddlProblem) -> WorldState:            # Converts a parsed PDDL problem into the simulator's starting state.
+    """Build an initial WorldState from a parsed PDDL problem."""
+
+    state = WorldState()
+    state.objects = deepcopy(problem.objects)
 
     # Collect typed objects
-    state.all_trucks = list(problem.objects.get('truck', []))               # Copies all objects of type truck, or uses an empty list if none exist.
-    state.all_packages = list(problem.objects.get('package', []))           # Copies all objects of type package.
-    state.all_locations = list(problem.objects.get('location', []))         # Copies all objects of type location.
-    state.all_areas = list(problem.objects.get('truckarea', []))            # Copies all objects of type truckarea.
+    state.all_trucks = list(problem.objects.get('truck', []))
+    state.all_packages = list(problem.objects.get('package', []))
+    state.all_locations = list(problem.objects.get('location', []))
+    state.all_areas = list(problem.objects.get('truckarea', []))
 
-    # Build ordered time steps
-    time_objs = problem.objects.get('time', [])                             # Gets the time objects from the parsed PDDL problem.
-
-    # Sort by numeric suffix: t0, t1, t2, ...
-    state.time_steps = sorted(                                              # Sorts the time names into chronological numeric order.
-        time_objs,                                                          # Supplies the list of parsed time objects.
-        key=lambda t: int(t[1:]) if t[1:].isdigit() else 0,                 # Extracts the number after "t"; names without a numeric suffix are treated as zero.
-    )
+    # Build ordered time steps (sorted by numeric suffix: t0, t1, t2, ...)
+    state.time_steps = sorted(problem.objects.get('time', []), key=_time_key)
 
     # Process init facts
-    for pred, args in problem.init_facts:                                   # Loops through every predicate and argument list in the original PDDL initial state.
+    for pred, args in problem.init_facts:
 
-        if pred == 'at':                                                    # Checks whether the fact says an object is at a location.
-            obj_name, loc = args[0], args[1]                               # Retrieves the object's name and location.
+        if pred == 'at':                                                    # An object is at a location.
+            obj_name, loc = args[0], args[1]
 
-            if obj_name in state.all_trucks:                                # Checks whether the object is a truck.
-                state.truck_locations[obj_name] = loc                       # Records the truck at that location.
+            if obj_name in state.all_trucks:
+                state.truck_locations[obj_name] = loc
 
-            elif obj_name in state.all_packages:                            # Checks whether the object is a package.
-                state.package_locations[obj_name] = loc                     # Records the package on the ground at that location.
+            elif obj_name in state.all_packages:
+                state.package_locations[obj_name] = loc
 
-        elif pred == 'free':                                                # Checks whether the fact says a truck cargo area is free.
-            area, truck = args[0], args[1]                                  # Retrieves the area and truck names.
-            state.free_areas.add((area, truck))                             # Adds the free-area record to the state.
+        elif pred == 'free':                                                # A truck cargo area is free.
+            area, truck = args[0], args[1]
+            state.free_areas.add((area, truck))
 
-        elif pred == 'connected':                                           # Checks whether the fact represents a road connection.
-            state.connections.add((args[0], args[1]))                       # Adds the directed connection from the first location to the second.
+        elif pred == 'connected':                                           # A directed road.
+            state.connections.add((args[0], args[1]))
 
-        elif pred == 'road-distance':                                      # Checks whether the fact gives a road's distance in miles.
+        elif pred == 'road-distance':                                      # A road's distance in miles, e.g. d35.
             try:
-                state.road_distance[(args[0], args[1])] = int(args[2][1:]) # Stores the integer miles after the leading 'd' of the object name.
+                state.road_distance[(args[0], args[1])] = int(args[2][1:])
             except (ValueError, IndexError):
-                pass                                                       # Ignores malformed distance facts instead of crashing.
+                pass
 
-        elif pred == 'road-speed':                                         # Checks whether the fact gives a road's speed in mph.
+        elif pred == 'road-speed':                                         # A road's speed in mph, e.g. s30.
             try:
-                state.road_speed[(args[0], args[1])] = int(args[2][1:])     # Stores the integer mph after the leading 's' of the object name.
+                state.road_speed[(args[0], args[1])] = int(args[2][1:])
             except (ValueError, IndexError):
-                pass                                                       # Ignores malformed speed facts instead of crashing.
+                pass
 
-        elif pred == 'loc-x':                                              # Checks whether the fact gives a location's grid x coordinate.
+        elif pred == 'loc-x':                                              # A location's grid x coordinate, e.g. c12.
             try:
-                state.loc_x[args[0]] = int(args[1][1:])                    # Stores the integer coordinate after the leading 'c' of the object name.
+                state.loc_x[args[0]] = int(args[1][1:])
             except (ValueError, IndexError):
-                pass                                                       # Ignores malformed coordinate facts instead of crashing.
+                pass
 
-        elif pred == 'loc-y':                                              # Checks whether the fact gives a location's grid y coordinate.
+        elif pred == 'loc-y':                                              # A location's grid y coordinate.
             try:
-                state.loc_y[args[0]] = int(args[1][1:])                    # Stores the integer coordinate after the leading 'c' of the object name.
+                state.loc_y[args[0]] = int(args[1][1:])
             except (ValueError, IndexError):
-                pass                                                       # Ignores malformed coordinate facts instead of crashing.
+                pass
 
-        elif pred == 'closer':                                              # Checks whether the fact represents a closer relationship between truck areas.
-            state.closer.add((args[0], args[1]))                            # Adds the cargo-area ordering relationship.
+        elif pred == 'closer':                                              # Cargo-area loading order.
+            state.closer.add((args[0], args[1]))
 
-        elif pred == 'time-now':                                            # Checks whether the fact specifies the starting time.
-            state.current_time = args[0]                                    # Sets the state's current time to the provided time name.
+        elif pred == 'time-now':                                            # Starting time.
+            state.current_time = args[0]
 
-        elif pred == 'le':                                                  # Checks whether the fact represents a less-than-or-equal time relationship.
-            state.le_predicates.add((args[0], args[1]))                     # Adds the time-ordering pair to the state.
+        elif pred == 'le':                                                  # Less-than-or-equal time relation.
+            state.le_predicates.add((args[0], args[1]))
 
-        elif pred == 'in':                                                  # Checks whether the fact says a package begins inside a truck.
-            # in ?p ?t ?a
-            state.cargo.add((args[0], args[1], args[2]))                    # Adds the package, truck, and cargo-area record to the cargo set.
+        elif pred == 'in':                                                  # A package starts inside a truck: in ?p ?t ?a
+            state.cargo.add((args[0], args[1], args[2]))
 
-    return state                                                            # Returns the fully initialized WorldState.
+    return state
 
 
-def _ensure_time(state: WorldState, t: str):                               # Defines a helper that keeps the ordered time list in sync.
+def _ensure_time(state: WorldState, t: str):                               # Keeps the ordered time list in sync.
     """Add a time-step name to state.time_steps if it is missing.
 
     Used when a replanned plan references extended horizon times (t7, t8, ...)
     that were created by the replan writer but do not exist in the original
     problem's time list.
     """
-    if t in state.time_steps:                                             # Checks whether the time step is already known.
-        return                                                            # Nothing to do when the time step already exists.
+    if t in state.time_steps:
+        return
 
-    state.time_steps.append(t)                                            # Appends the new time step.
-    state.time_steps.sort(                                               # Re-sorts the list chronologically.
-        key=lambda ts: int(ts[1:]) if ts[1:].isdigit() else 0             # Extracts the number after "t" for ordering.
-    )
+    state.time_steps.append(t)
+    state.time_steps.sort(key=_time_key)
 
 
 # ---------------------------------------------------------------------------
-# Action application
+# Action validation and application
 # ---------------------------------------------------------------------------
 
-def apply_action(state: WorldState, action: PlanAction) -> WorldState:       # Defines the function that changes the current state according to one completed plan action.
+EXPECTED_ARG_COUNTS = {"drive": 5, "drive-instant": 4, "load": 4, "unload": 4, "deliver": 4}
+
+
+def validate_action(state: WorldState, action: PlanAction) -> Optional[str]:
+    """Return an error message when an action is not valid in the current state."""
+    name = action.name.lower()
+    args = action.args
+
+    if name not in EXPECTED_ARG_COUNTS:
+        return f"unknown action '{action.name}'"
+    if len(args) != EXPECTED_ARG_COUNTS[name]:
+        return f"{name} expects {EXPECTED_ARG_COUNTS[name]} arguments, got {len(args)}"
+
+    if name in ("drive", "drive-instant"):
+        truck, from_loc, to_loc, t1 = args[:4]
+        if state.truck_locations.get(truck) != from_loc:
+            return f"{truck} is not at {from_loc}"
+        if (from_loc, to_loc) not in state.connections:
+            return f"no active road connects {from_loc} to {to_loc}"
+        if state.current_time != t1:
+            return f"current time is {state.current_time}, not {t1}"
+        if t1 not in state.time_steps:
+            return f"unknown time step {t1}"
+
+        expected = state.road_duration(from_loc, to_loc)                    # 1 for problems without road data.
+
+        if name == "drive-instant":
+            if expected != 0:
+                return f"{from_loc}->{to_loc} takes {expected}t, so it cannot be an instant drive"
+        else:
+            t2 = args[4]
+            if t2 not in state.time_steps:
+                return f"unknown time step {t2}"
+            gap = state.time_steps.index(t2) - state.time_steps.index(t1)
+            if gap != expected:
+                return f"{from_loc}->{to_loc} takes {expected}t, but the plan uses {gap}t ({t1}->{t2})"
+
+    elif name == "load":
+        package, truck, area, location = args
+        if state.truck_locations.get(truck) != location:
+            return f"{truck} is not at {location}"
+        if state.package_locations.get(package) != location:
+            return f"{package} is not at {location}"
+        if (area, truck) not in state.free_areas:
+            return f"area {area} on {truck} is not free"
+        blocked = [
+            closer_area for closer_area, farther_area in state.closer
+            if farther_area == area and (closer_area, truck) not in state.free_areas
+        ]
+        if blocked:
+            return f"closer area(s) {', '.join(sorted(blocked))} must be free"
+
+    elif name == "unload":
+        package, truck, area, location = args
+        if state.truck_locations.get(truck) != location:
+            return f"{truck} is not at {location}"
+        if (package, truck, area) not in state.cargo:
+            return f"{package} is not in area {area} on {truck}"
+        blocked = [
+            closer_area for closer_area, farther_area in state.closer
+            if farther_area == area and (closer_area, truck) not in state.free_areas
+        ]
+        if blocked:
+            return f"closer area(s) {', '.join(sorted(blocked))} must be free"
+
+    elif name == "deliver":
+        package, location, t1, t2 = args
+        if state.package_locations.get(package) != location:
+            return f"{package} is not at {location}"
+        if state.current_time != t1:
+            return f"current time is {state.current_time}, not {t1}"
+        if (t1, t2) not in state.le_predicates:
+            return f"deadline {t2} is earlier than {t1} or is unknown"
+
+    return None
+
+
+def apply_action(state: WorldState, action: PlanAction) -> WorldState:       # Changes the current state according to one completed plan action.
     """
-    Apply a grounded plan action to the world state (in place) and return it.
+    Validate a grounded plan action, then apply it to the world state
+    (in place) and return it. Raises ValueError for an invalid action.
 
     Actions:
         (drive ?truck ?from ?to ?t1 ?t2)
+        (drive-instant ?truck ?from ?to ?t1)
         (load ?package ?truck ?area ?location)
         (unload ?package ?truck ?area ?location)
         (deliver ?package ?location ?t1 ?t2)
-    """                                                                     # Function docstring listing the expected arguments for each supported action.
+    """
 
-    name = action.name.lower()                                              # Converts the action name to lowercase so capitalization does not affect matching.
-    args = action.args                                                      # Creates a shorter local reference to the action argument list.
+    error = validate_action(state, action)
+    if error:
+        raise ValueError(f"Invalid action {action}: {error}")
 
-    if name == 'drive':                                                     # Checks whether the current action moves a truck.
-        truck, from_loc, to_loc, t1, t2 = args                              # Unpacks the truck, source, destination, starting time, and ending time.
-        _ensure_time(state, t2)                                             # Registers the arrival time in case it came from an extended replan horizon.
-        state.truck_locations[truck] = to_loc                               # Updates the truck's location to the drive destination.
-        state.current_time = t2                                             # Advances the world state's current time to the action's ending time.
+    name = action.name.lower()
+    args = action.args
 
-    elif name == 'drive-instant':                                           # Checks whether the action is an instant (0t) drive.
-        truck, from_loc, to_loc, t1 = args                                  # Unpacks the truck, source, destination, and current time.
-        state.truck_locations[truck] = to_loc                               # Moves the truck to the destination.
-        # Time is deliberately unchanged: the trip completed within the current hour.
+    if name == 'drive':                                                     # Moves a truck and advances the clock by the road's travel time.
+        truck, from_loc, to_loc, t1, t2 = args
+        _ensure_time(state, t2)
+        state.truck_locations[truck] = to_loc
+        state.current_time = t2
 
-    elif name == 'load':                                                    # Checks whether the current action loads a package into a truck.
-        package, truck, area, location = args                               # Unpacks the package, truck, cargo area, and location.
+    elif name == 'drive-instant':                                           # 0t road: the truck moves, the clock does not.
+        truck, from_loc, to_loc, t1 = args
+        state.truck_locations[truck] = to_loc
 
-        # Package leaves the ground
-        if package in state.package_locations:                              # Checks whether the package currently has a ground-location record.
-            del state.package_locations[package]                            # Removes the package from the ground-location dictionary.
+    elif name == 'load':                                                    # Package leaves the ground and enters a free cargo area.
+        package, truck, area, location = args
 
-        # Package enters the truck
-        state.cargo.add((package, truck, area))                             # Adds a record stating that the package is inside the specified truck area.
+        if package in state.package_locations:
+            del state.package_locations[package]
 
-        # Area is no longer free
-        state.free_areas.discard((area, truck))                             # Removes the cargo area from the free-area set without failing if it is already absent.
+        state.cargo.add((package, truck, area))
+        state.free_areas.discard((area, truck))
 
-    elif name == 'unload':                                                  # Checks whether the current action unloads a package from a truck.
-        package, truck, area, location = args                               # Unpacks the package, truck, cargo area, and location.
+    elif name == 'unload':                                                  # Package leaves the truck and is placed on the ground.
+        package, truck, area, location = args
 
-        # Package leaves the truck
-        state.cargo.discard((package, truck, area))                         # Removes the package's cargo record from the truck.
+        state.cargo.discard((package, truck, area))
+        state.package_locations[package] = location
+        state.free_areas.add((area, truck))
 
-        # Package is now on the ground at the truck's location
-        state.package_locations[package] = location                         # Records the package on the ground at the unload location.
+    elif name == 'deliver':                                                 # Package is handed over at its destination.
+        package, location, t1, t2 = args
 
-        # Area becomes free
-        state.free_areas.add((area, truck))                                 # Marks the truck's cargo area as available again.
+        if package in state.package_locations:
+            del state.package_locations[package]
 
-    elif name == 'deliver':                                                 # Checks whether the current action completes a package delivery.
-        package, location, t1, t2 = args                                    # Unpacks the package, destination location, starting time, and ending time.
+        state.delivered.add((package, location, t2))
+        state.at_destination.add((package, location))
 
-        # Package is delivered
-        if package in state.package_locations:                              # Checks whether the delivered package still has a ground-location record.
-            del state.package_locations[package]                            # Removes the package from the ground-location dictionary.
-
-        state.delivered.add((package, location, t2))                        # Adds a completed-delivery record containing package, location, and delivery time.
-        state.at_destination.add((package, location))                       # Records that the package reached its destination.
-
-    return state                                                            # Returns the same WorldState object after modifying it in place.
+    return state
 
 
 # ---------------------------------------------------------------------------
 # Display helpers
 # ---------------------------------------------------------------------------
 
-def state_summary(state: WorldState) -> str:                                # Defines a function that converts a WorldState into a short readable report.
-    """Return a concise human-readable summary of the current world state."""  # Function docstring explaining its purpose.
+def state_summary(state: WorldState, include_roads: bool = False) -> str:   # Converts a WorldState into a short readable report.
+    """Return a concise human-readable summary of the current world state.
 
-    lines = []                                                              # Creates an empty list for each line of the state summary.
-    lines.append(f"  Time: {state.current_time}")                           # Adds the current simulation time as the first summary line.
+    visualizer.py parses these lines, so keep their format stable.
+    """
 
-    for truck in sorted(state.all_trucks):                                  # Loops through all truck names in alphabetical order.
-        loc = state.truck_locations.get(truck, "???")                       # Gets the truck's current location or displays ??? if no location exists.
-        cargo_list = [p for p, t, a in state.cargo if t == truck]           # Builds a list of package names currently carried by this truck.
-        cargo_str = f" carrying [{', '.join(sorted(cargo_list))}]" if cargo_list else ""  # Creates cargo text when the truck is carrying packages.
-        lines.append(f"  {truck} @ {loc}{cargo_str}")                       # Adds a summary line showing the truck's location and optional cargo.
+    lines = [f"  Time: {state.current_time}"]
 
-    ground_pkgs = sorted(state.package_locations.items())                   # Creates a sorted list of packages currently located on the ground.
+    for truck in sorted(state.all_trucks):
+        loc = state.truck_locations.get(truck, "???")
+        cargo_list = [p for p, t, a in state.cargo if t == truck]
+        cargo_str = f" carrying [{', '.join(sorted(cargo_list))}]" if cargo_list else ""
+        lines.append(f"  {truck} @ {loc}{cargo_str}")
 
-    if ground_pkgs:                                                        # Checks whether at least one package is on the ground.
-        lines.append(                                                       # Adds one summary line listing all packages on the ground.
+    ground_pkgs = sorted(state.package_locations.items())
+
+    if ground_pkgs:
+        lines.append(
             f"  Packages on ground: "
-            f"{', '.join(f'{p}@{l}' for p, l in ground_pkgs)}"             # Formats each package as package@location and joins them with commas.
+            f"{', '.join(f'{p}@{l}' for p, l in ground_pkgs)}"
         )
 
-    if state.delivered:                                                    # Checks whether any deliveries have been completed.
-        lines.append(                                                       # Adds one summary line listing delivered packages and locations.
+    if state.delivered:
+        lines.append(
             f"  Delivered: "
-            f"{', '.join(f'{p}→{l}' for p, l, _ in sorted(state.delivered))}"  # Formats each completed delivery as package→location.
+            f"{', '.join(f'{p}→{l}' for p, l, _ in sorted(state.delivered))}"
         )
 
-    if state.connections and state.road_distance:                          # Checks whether road metrics are available for display.
-        lines.append("  Roads (distance @ speed = travel time):")          # Adds a header for the road metric listing.
+    if include_roads and state.connections and state.has_road_metrics():
+        lines.append("  Roads (distance @ speed = travel time):")
 
-        for from_loc, to_loc in sorted(state.connections):                  # Loops through every directed road in alphabetical order.
-            d = state.road_distance.get((from_loc, to_loc))                 # Gets the road's distance in miles.
-            s = state.road_speed.get((from_loc, to_loc))                    # Gets the road's speed in mph.
+        for from_loc, to_loc in sorted(state.connections):
+            d = state.road_distance.get((from_loc, to_loc))
+            s = state.road_speed.get((from_loc, to_loc))
 
-            if d is not None and s is not None:                             # Shows the road only when both metrics exist.
-                dur = state.road_duration(from_loc, to_loc)                  # Computes the road's rounded travel time in hours.
-                lines.append(f"    {from_loc} → {to_loc}: {d}mi @ {s}mph = {dur}t")  # Displays the road with distance, speed, and travel time.
+            if d is not None and s is not None:
+                dur = state.road_duration(from_loc, to_loc)
+                lines.append(f"    {from_loc} → {to_loc}: {d}mi @ {s}mph = {dur}t")
 
-    return '\n'.join(lines)                                                 # Combines all summary lines into one string separated by newline characters.
-
+    return '\n'.join(lines)

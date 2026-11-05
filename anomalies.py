@@ -247,7 +247,7 @@ class AnomalyGenerator:
         self, state: WorldState, action: PlanAction
     ) -> Optional[AnomalyEvent]:
         """Generate a road closure anomaly (maintains graph connectivity)."""
-        connections = list(state.connections)
+        connections = sorted(state.connections)   # sorted so the same --seed gives the same run every time
         if len(connections) < 6:  # Need enough connections to safely remove one
             return None
 
@@ -260,9 +260,11 @@ class AnomalyGenerator:
             conn = self.rng.choice(connections)
             closed_from, closed_to = conn
 
-        # Connectivity check: ensure all locations remain reachable
+        # Connectivity check: ensure all locations remain reachable.
+        # The case library closes the road in both directions, so test both.
         test_conns = set(state.connections)
         test_conns.discard((closed_from, closed_to))
+        test_conns.discard((closed_to, closed_from))
         if not self._is_connected(state.all_locations, test_conns):
             return None  # Would disconnect the graph
 

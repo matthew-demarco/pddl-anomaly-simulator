@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trucks Grid Visualizer</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ===================== Left: controls ===================== -->
+  <aside id="controls">
+    <h1>Trucks Grid Visualizer</h1>
+
+    <label for="problem">Problem</label>
+    <select id="problem"></select>
+    <div id="problem-meta" class="hint"></div>
+    <button id="problem-upload" class="secondary">Load .pddl file…</button>
+    <input type="file" id="problem-file" accept=".pddl,.txt" hidden>
+
+    <label>Initial plan</label>
+    <div class="radio-row">
+      <label class="radio"><input type="radio" name="plan-source" value="generate" checked> Generate (Fast Downward)</label>
+      <label class="radio"><input type="radio" name="plan-source" value="load"> Load plan file</label>
+    </div>
+    <div id="load-plan-box" hidden>
+      <select id="plan-file-select"></select>
+      <div id="plan-meta" class="hint"></div>
+      <button id="plan-upload" class="secondary">Upload .plan file…</button>
+      <input type="file" id="plan-file" accept=".plan,.txt" hidden>
+    </div>
+    <label class="check" id="save-plan-row"><input type="checkbox" id="save-plan"> Save generated plan to <span id="save-plan-name">plans/</span></label>
+
+    <label for="anomaly-chance">Anomaly chance: <span id="chance-value">0%</span></label>
+    <input type="range" id="anomaly-chance" min="0" max="100" value="0">
+
+    <label for="seed">Random seed (optional)</label>
+    <input type="text" id="seed" placeholder="e.g. 42 (empty = random)">
+
+    <label for="anomaly-input">Manual anomalies (one per line)</label>
+    <textarea id="anomaly-input" rows="3"
+      placeholder="road_closure:3:l2:l3&#10;new_delivery:8:package_new1:l2:l3"></textarea>
+    <details id="anomaly-builder">
+      <summary>Add an anomaly from a list…</summary>
+      <label for="ab-type">Type</label>
+      <select id="ab-type">
+        <option value="road_closure">Road closure</option>
+        <option value="truck_breakdown">Truck breakdown</option>
+        <option value="new_delivery">New delivery</option>
+        <option value="deadline_change">Deadline change</option>
+      </select>
+      <label for="ab-step">At step (whole number, 1 or more)</label>
+      <input type="text" id="ab-step" inputmode="numeric" value="3">
+      <div id="ab-fields"></div>
+      <div id="ab-error" class="hint error"></div>
+      <button id="ab-add" class="secondary">Add to list</button>
+    </details>
+
+    <label for="fd-path">Fast Downward path (optional)</label>
+    <input type="text" id="fd-path" placeholder="C:\path\to\fast-downward">
+    <div id="fd-status" class="hint"></div>
+    <button id="fd-save" class="secondary">Save FD path</button>
+
+    <button id="run" class="primary">▶ Run Simulation</button>
+    <div id="run-status" class="hint"></div>
+  </aside>
+
+  <!-- ===================== Center: map ===================== -->
+  <main id="map-area">
+    <div id="canvas-wrap"><canvas id="map"></canvas></div>
+
+    <div id="playback">
+      <button id="btn-prev" title="Previous frame">⏪</button>
+      <button id="btn-play" title="Play / pause">▶</button>
+      <button id="btn-next" title="Next frame">⏩</button>
+      <div id="slider-wrap">
+        <div id="replan-ticks"></div>
+        <input type="range" id="frame-slider" min="0" max="0" value="0">
+      </div>
+      <span id="frame-label">frame 0 / 0</span>
+    </div>
+  </main>
+
+  <!-- ===================== Right: data panel ===================== -->
+  <aside id="data-panel">
+    <section class="panel-block">
+      <h2>Time</h2>
+      <div id="time-display" class="big">—</div>
+      <div id="last-action" class="mono"></div>
+      <div id="anomaly-note" class="anomaly-note" hidden></div>
+    </section>
+
+    <section class="panel-block">
+      <h2 id="plan-title">Plan</h2>
+      <ol id="plan-list" class="plan-list"></ol>
+    </section>
+
+    <section class="panel-block">
+      <h2>Delivery goals</h2>
+      <ul id="goal-list" class="goals"></ul>
+    </section>
+
+    <section class="panel-block">
+      <h2>Trucks & cargo</h2>
+      <ul id="truck-list"></ul>
+    </section>
+
+    <section class="panel-block">
+      <h2>Packages on the ground</h2>
+      <ul id="package-list"></ul>
+    </section>
+
+    <section class="panel-block grow">
+      <h2>Run log</h2>
+      <pre id="log"></pre>
+    </section>
+  </aside>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

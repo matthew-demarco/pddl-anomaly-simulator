@@ -4,22 +4,38 @@ Plan Simulator for the Trucks Domain.
 Executes a plan step-by-step, checking for anomalies before each action.
 When an anomaly is detected, invokes the Case-Based Reasoner and triggers
 replanning with a modified PDDL problem file.
+
+The initial plan comes from one of two sources:
+  * LOAD:     a pre-made plan file (plan_path given)
+  * GENERATE: Fast Downward plans it from the problem (plan_path omitted)
+
+Every state is recorded in self.state_history as a plain dict ("snapshot"),
+including one frame per hour while a truck drives a multi-hour road. The
+browser app (server.py) reads state_history directly; the Tkinter GUI reads
+the same snapshots as @@MAP_STATE@@ JSON lines when json_output is on.
 """
 
-import os
-import tempfile
-import shutil
 import json
-from pathlib import Path
-from typing import List, Optional, Tuple, Dict, Any
+import os
+import shutil
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
 
-from pddl_parser import PddlProblem, parse_domain, parse_problem
-from state import WorldState, PlanAction, apply_action, initialize_from_problem, state_summary
-from anomalies import AnomalyGenerator, AnomalyEvent, AnomalyType, ScheduledAnomaly, create_manual_event
+from anomalies import AnomalyEvent, AnomalyGenerator, AnomalyType, ScheduledAnomaly, create_manual_event
 from case_library import CaseLibrary, CaseResponse
+from pddl_parser import parse_domain, parse_problem
 from pddl_writer import generate_problem_pddl
-from planner import run_fast_downward, cleanup_planner_files
+from planner import parse_plan, run_fast_downward
+from state import (
+    PlanAction,
+    WorldState,
+    apply_action,
+    initialize_from_problem,
+    state_summary,
+    validate_action,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -35,6 +51,8 @@ class SimulationResult:
     replans_triggered: int = 0
     final_state: Optional[WorldState] = None
     failure_reason: str = ""
+    plan_source: str = ""                     # "loaded" or "generated"
+    saved_plan_path: Optional[str] = None     # set when a generated plan was saved
 
 
 # ---------------------------------------------------------------------------
@@ -46,16 +64,18 @@ class Simulator:
     Step-by-step plan executor with anomaly injection and replanning.
 
     Flow:
-        1. Generate initial plan with Fast Downward
+        1. Get the initial plan: load plan_path, or generate it with Fast Downward
         2. For each action in the plan:
-           a. Check for anomaly (via AnomalyGenerator)
+           a. Check for a user-scheduled anomaly (or, if anomaly_chance > 0,
+              a random one from the AnomalyGenerator)
            b. If anomaly:
               i.   Recognize via CaseLibrary
               ii.  Apply PDDL modifications
               iii. Regenerate problem file
               iv.  Re-invoke Fast Downward
               v.   Continue with new plan
-           c. Execute action, update world state
+           c. Validate and execute the action, update world state
+              (drives emit one frame per hour on the road)
         3. Report results
     """
 
@@ -63,20 +83,29 @@ class Simulator:
         self,
         domain_path: str,
         problem_path: str,
-        anomaly_chance: float = 0.2,
+        plan_path: Optional[str] = None,
+        anomaly_chance: float = 0.0,
         seed: Optional[int] = None,
         verbose: bool = True,
         max_anomalies: int = 5,
         scheduled_anomalies: Optional[List[ScheduledAnomaly]] = None,
         search: str = "eager_greedy([ff()])",
+        fast_downward_script: Optional[str] = None,
         export_states_dir: Optional[str] = None,
         json_output: bool = False,
+        save_plan_path: Optional[str] = None,
     ):
         self.domain_path = str(Path(domain_path).resolve())
+        self.problem_path = str(Path(problem_path).resolve())
+        self.plan_path = str(Path(plan_path).resolve()) if plan_path else None
+        self.save_plan_path = str(Path(save_plan_path).resolve()) if save_plan_path else None
         self.search = search
+        self.fast_downward_script = fast_downward_script
         self.export_states_dir = export_states_dir
         self.json_output = json_output
-        
+        self.verbose = verbose
+        self.anomaly_chance = anomaly_chance
+
         # Clear out previous state history if enabled
         if self.export_states_dir:
             os.makedirs(self.export_states_dir, exist_ok=True)
@@ -87,10 +116,6 @@ class Simulator:
                         os.remove(file_path)
                 except Exception:
                     pass  # Ignore files that might be locked by editors in Windows
-            
-        self.problem_path = str(Path(problem_path).resolve())
-        self.anomaly_chance = anomaly_chance
-        self.verbose = verbose
 
         # Parse the domain and problem
         self.domain = parse_domain(self.domain_path)
@@ -100,25 +125,37 @@ class Simulator:
         self.state = initialize_from_problem(self.problem)
 
         # Components
-        self.anomaly_gen = AnomalyGenerator(
+        self.anomaly_gen = AnomalyGenerator(                             # Random anomalies (off unless anomaly_chance > 0).
             anomaly_chance=anomaly_chance,
             seed=seed,
             max_anomalies=max_anomalies,
         )
         self.scheduled_anomalies = list(scheduled_anomalies or [])
-
         self.case_library = CaseLibrary()
 
         # Tracking
         self.result = SimulationResult(success=False)
         self._replan_counter = 0
         self._export_seq = 0
+        self._step = 0
+        self._plan_id = 0
+        self._plan_pos = 0
+        self._broken_trucks: Set[str] = set()
+        self._initial_edges: Set[Tuple[str, str]] = {
+            tuple(sorted(c)) for c in self.state.connections
+        }
 
-        # In-memory snapshot history, always collected regardless of
-        # --json-output, so a caller running the Simulator directly (e.g. a
-        # visualizer) can read sim.state_history after/while run() executes.
+        # In-memory snapshot history, always collected (regardless of
+        # json_output) so a caller holding the Simulator (server.py, a test,
+        # a notebook) can read it directly. self.plans lists every plan used:
+        # the initial one plus one per replan.
         self.state_history: List[Dict[str, Any]] = []
+        self.plans: List[Dict[str, Any]] = []
         self._last_event: Optional[str] = None
+
+    # ------------------------------------------------------------------
+    # Snapshots
+    # ------------------------------------------------------------------
 
     def _export_state(self, suffix: str):
         if not self.export_states_dir:
@@ -129,54 +166,45 @@ class Simulator:
         generate_problem_pddl(state=self.state, original_problem=self.problem, response=None, output_path=out_path)
         self._export_seq += 1
 
-    def _time_index(self, t: str) -> Optional[int]:
-        """Return the chronological index of a time-step name like 't3', or None."""
-        try:
-            return self.state.time_steps.index(t)
-        except ValueError:
-            return None
+    @staticmethod
+    def _time_index(t: Optional[str]) -> Optional[int]:
+        """Hour number of a time name like 't3' (by its number, so it stays correct after replans)."""
+        if t and t[1:].isdigit():
+            return int(t[1:])
+        return None
 
     def _grid_info(self) -> Dict[str, Any]:
-        """Return the grid layout: 1 cell = 1 mile."""
+        """Return the grid layout: 1 cell = 1 mile. Empty when the problem has no coordinates."""
         locs = {}
-
         for loc in self.state.all_locations:
-            x = self.state.loc_x.get(loc)
-            y = self.state.loc_y.get(loc)
-
+            x, y = self.state.loc_x.get(loc), self.state.loc_y.get(loc)
             if x is not None and y is not None:
                 locs[loc] = [x, y]
 
-        width = max((v[0] for v in locs.values()), default=0) + 1 if locs else 0
-        height = max((v[1] for v in locs.values()), default=0) + 1 if locs else 0
-
+        width = max((v[0] for v in locs.values()), default=-1) + 1
+        height = max((v[1] for v in locs.values()), default=-1) + 1
         return {"width": width, "height": height, "locations": locs}
 
     def _roads_info(self) -> List[Dict[str, Any]]:
-        """Return per-road distance/speed/duration metadata for current connections."""
+        """Every road that existed at the start (one entry per pair), with metrics and open/closed status."""
+        open_edges = {tuple(sorted(c)) for c in self.state.connections}
         roads = []
-
-        for f, t in sorted(self.state.connections):
-            d = self.state.road_distance.get((f, t))
-            s = self.state.road_speed.get((f, t))
-
-            if d is None or s is None:
-                continue
-
+        for a, b in sorted(self._initial_edges):
+            d = self.state.road_distance.get((a, b), self.state.road_distance.get((b, a)))
+            s = self.state.road_speed.get((a, b), self.state.road_speed.get((b, a)))
             roads.append({
-                "from": f,
-                "to": t,
+                "from": a,
+                "to": b,
                 "distance": d,
                 "speed": s,
-                "duration": self.state.road_duration(f, t),
+                "duration": self.state.road_duration(a, b) if d is not None and s is not None else None,
+                "closed": (a, b) not in open_edges,
             })
-
         return roads
 
     def _resting_position(self, truck: str) -> Dict[str, Any]:
-        """Return a truck's display position when parked at a location."""
+        """A truck's display position when parked at a location."""
         loc = self.state.truck_locations.get(truck)
-
         return {
             "x": self.state.loc_x.get(loc),
             "y": self.state.loc_y.get(loc),
@@ -185,48 +213,129 @@ class Simulator:
             "fraction": 0.0,
         }
 
-    def _build_state_snapshot(self) -> Dict[str, Any]:
-        """Build a plain-dict snapshot of the current world state.
-
-        Always available on self.state_history regardless of --json-output,
-        so a caller holding a Simulator instance directly (a visualizer, a
-        notebook, a test) can read it without going through stdout at all.
-        """
+    def _build_state_snapshot(self, kind: str = "action") -> Dict[str, Any]:
+        """Build a plain-dict snapshot of the current world state."""
+        s = self.state
+        open_edges = {tuple(sorted(c)) for c in s.connections}
         return {
-            "locations": list(self.state.all_locations),
-            "trucks": {t: loc for t, loc in self.state.truck_locations.items()},
-            "packages_at_locations": {pkg: loc for pkg, loc in self.state.package_locations.items()},
-            "cargo": [{"package": p, "truck": t, "area": a} for p, t, a in self.state.cargo],
-            "connections": [[f, t] for f, t in self.state.connections],
-            "delivered": [{"package": p, "location": l, "time": t} for p, l, t in self.state.delivered],
-            "current_time": self.state.current_time,
-            "hour": self._time_index(self.state.current_time),
+            "kind": kind,                       # initial | action | transit | anomaly | stopped
+            "step": self._step,
+            "plan_id": self._plan_id,
+            "plan_pos": self._plan_pos,         # actions of the current plan already done
+            "locations": list(s.all_locations),
+            "trucks": dict(s.truck_locations),
+            "broken_trucks": sorted(self._broken_trucks),
+            "packages_at_locations": dict(s.package_locations),
+            "cargo": [{"package": p, "truck": t, "area": a} for p, t, a in sorted(s.cargo)],
+            "connections": [[f, t] for f, t in sorted(s.connections)],
+            "closed_roads": [list(e) for e in sorted(self._initial_edges - open_edges)],
+            "delivered": [{"package": p, "location": l, "time": t} for p, l, t in sorted(s.delivered)],
+            "current_time": s.current_time,
+            "hour": self._time_index(s.current_time),
             "grid": self._grid_info(),
             "roads": self._roads_info(),
-            "truck_positions": {t: self._resting_position(t) for t in self.state.truck_locations},
-            "goals": [{"predicate": gc.predicate, "arguments": gc.arguments} for gc in self.problem.goal_conditions],
+            "truck_positions": {t: self._resting_position(t) for t in s.truck_locations},
+            "goals": [{"predicate": g.predicate, "arguments": g.arguments} for g in self.problem.goal_conditions],
             "last_action": self._last_event,
         }
 
-    def _emit_json_state(self, event: Optional[str] = None, snapshot: Optional[Dict[str, Any]] = None):
-        """Record a snapshot in self.state_history, and also print it to
-        stdout as @@MAP_STATE@@ JSON when --json-output is set (kept for the
-        existing GUI, which consumes that stream over a subprocess pipe).
+    def initial_snapshot(self) -> Dict[str, Any]:
+        """The map before anything runs (used by the browser to show a problem immediately)."""
+        return self._build_state_snapshot(kind="initial")
 
-        An optional prebuilt snapshot can be supplied (used for the per-hour
-        in-transit frames emitted while a truck is driving a multi-hour road)."""
+    def _emit_json_state(
+        self,
+        event: Optional[str] = None,
+        snapshot: Optional[Dict[str, Any]] = None,
+        kind: str = "action",
+        extra: Optional[Dict[str, Any]] = None,
+    ):
+        """Record a snapshot in self.state_history, and print it as an
+        @@MAP_STATE@@ JSON line when json_output is set (read by gui.py)."""
         if event is not None:
             self._last_event = event
 
         if snapshot is None:
-            snapshot = self._build_state_snapshot()
-        else:
-            snapshot["last_action"] = self._last_event                     # Keeps supplied in-transit frames consistent with the event log.
+            snapshot = self._build_state_snapshot(kind)
+        snapshot["last_action"] = self._last_event
+        if extra:
+            snapshot.update(extra)
 
         self.state_history.append(snapshot)
 
         if self.json_output:
             self._log(f"@@MAP_STATE@@{json.dumps(snapshot)}")
+
+    def _register_plan(self, plan: List[PlanAction], label: str, source: str):
+        self.plans.append({
+            "id": len(self.plans),
+            "label": label,
+            "source": source,
+            "actions": [str(a) for a in plan],
+        })
+        self._plan_id = len(self.plans) - 1
+        self._plan_pos = 0
+
+    # ------------------------------------------------------------------
+    # Setup checks and the initial plan
+    # ------------------------------------------------------------------
+
+    def _compatibility_error(self) -> Optional[str]:
+        """Explain a domain/problem mismatch before Fast Downward gives a cryptic error."""
+        domain_uses_spans = any("road-span" in a.precondition_raw for a in self.domain.actions)
+        problem_has_spans = any(p == "road-span" for p, _ in self.problem.init_facts)
+
+        if domain_uses_spans and self.state.connections and not problem_has_spans:
+            return (
+                "This problem has no road distance/speed data, but domain.pddl needs it. "
+                "Upgrade the problem with: py tools/upgrade_problems.py"
+            )
+        if problem_has_spans and not domain_uses_spans:
+            return (
+                "This problem has road distance/speed data, but domain.pddl is the original "
+                "Trucks domain. Replace domain.pddl with the extended version."
+            )
+        return None
+
+    def _get_initial_plan(self) -> Optional[List[PlanAction]]:
+        """Load the supplied plan, or generate one with Fast Downward. Sets failure_reason on error."""
+        if self.plan_path:
+            self.result.plan_source = "loaded"
+            self._log("  PHASE 1: Loading supplied initial plan")
+            self._log("━" * 65)
+            try:
+                return parse_plan(self.plan_path)
+            except (OSError, ValueError) as error:
+                self._log(f"  ❌ Could not load supplied plan: {error}")
+                self.result.failure_reason = f"Invalid supplied plan: {error}"
+                return None
+
+        self.result.plan_source = "generated"
+        self._log("  PHASE 1: Generating initial plan with Fast Downward")
+        self._log("━" * 65)
+        plan = run_fast_downward(
+            self.domain_path,
+            self.problem_path,
+            search=self.search,
+            plan_file=self.save_plan_path,                              # None -> .planner-output/sas_plan
+            fast_downward_script=self.fast_downward_script,
+        )
+        if plan is None:
+            self._log("  ❌ Fast Downward could not generate an initial plan.")
+            self.result.failure_reason = (
+                "No initial plan: Fast Downward was not found, or the problem is unsolvable "
+                "(see the [Planner] lines above)."
+            )
+            return None
+
+        if self.save_plan_path:
+            self.result.saved_plan_path = self.save_plan_path
+            self._log(f"  💾 Saved generated plan to {self.save_plan_path}")
+        return plan
+
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
 
     def run(self) -> SimulationResult:
         """Execute the full simulation loop."""
@@ -235,27 +344,33 @@ class Simulator:
         self._log("=" * 65)
         self._log(f"  Problem: {self.problem.name}")
         self._log(f"  Domain:  {self.domain.name}")
+        self._log(f"  Plan source: {self.plan_path or 'generated by Fast Downward'}")
+        self._log(f"  Scheduled anomalies: {len(self.scheduled_anomalies)}")
         self._log(f"  Anomaly chance: {self.anomaly_chance:.0%}")
         self._log(f"  Case library: {len(self.case_library.cases)} cases loaded")
         self._log("=" * 65)
         self._log("")
 
-        # --- Initial plan ---
-        self._log("━" * 65)
-        self._log("  PHASE 1: Generating initial plan")
-        self._log("━" * 65)
-
-        cleanup_planner_files()
-        plan = run_fast_downward(self.domain_path, self.problem_path, search=self.search)
-
-        if plan is None:
-            self._log("  ❌ Fast Downward could not find an initial plan.")
-            self.result.failure_reason = "No initial plan found."
+        mismatch = self._compatibility_error()
+        if mismatch:
+            self._log(f"  ❌ {mismatch}")
+            self.result.failure_reason = mismatch
             return self.result
 
-        self._log(f"  ✅ Initial plan: {len(plan)} actions")
+        # --- Initial plan ---
+        self._log("━" * 65)
+        plan = self._get_initial_plan()
+        if plan is None:
+            return self.result
+        if not plan:
+            self._log("  ❌ The initial plan contains no actions.")
+            self.result.failure_reason = "Initial plan is empty."
+            return self.result
+
+        self._log(f"  ✅ Initial plan: {len(plan)} actions ({self.result.plan_source})")
         self._log("")
         self._print_plan(plan)
+        self._register_plan(plan, "Initial plan", self.result.plan_source)
 
         # --- Execution loop ---
         self._log("")
@@ -264,47 +379,35 @@ class Simulator:
         self._log("━" * 65)
         self._log("")
         self._log("  Initial state:")
-        self._log(state_summary(self.state))
+        self._log(state_summary(self.state, include_roads=True))
         self._log("")
 
         self._export_state("initial")
-        self._emit_json_state(event="(initial state)")
+        self._emit_json_state(event="(initial state)", kind="initial")
 
-        step = 0
         plan_idx = 0
 
         while plan_idx < len(plan):
             action = plan[plan_idx]
-            step += 1
+            self._step += 1
+            step = self._step
 
-            # --- Check for anomaly ---
+            # --- Check for a scheduled anomaly ---
             anomaly = None
-
-            scheduled = next(
-                (
-                    item
-                    for item in self.scheduled_anomalies
-                    if item.step == step
-                ),
-                None,
-            )
+            scheduled = next((item for item in self.scheduled_anomalies if item.step == step), None)
 
             if scheduled is not None:
                 self.scheduled_anomalies.remove(scheduled)
 
                 try:
-                    anomaly = create_manual_event(
-                        scheduled,
-                        self.state,
-                    )
+                    anomaly = create_manual_event(scheduled, self.state)
                 except ValueError as error:
-                    self._log(
-                        f"  ⚠️ Scheduled anomaly at step {step} was rejected: {error}"
-                    )
+                    self._log(f"  ⚠️ Scheduled anomaly at step {step} was rejected: {error}")
+                    return self._stop(f"Scheduled anomaly at step {step} was rejected: {error}")
 
-            if anomaly is None:
-                # No manually scheduled anomaly at this step: fall back to the
-                # random anomaly generator (anomaly-chance control in the GUI).
+            if anomaly is None and self.anomaly_chance > 0:
+                # No anomaly scheduled at this step: fall back to the random
+                # anomaly generator (anomaly-chance control in the GUI / browser).
                 anomaly = self.anomaly_gen.maybe_trigger(self.state, action)
 
             if anomaly:
@@ -318,7 +421,6 @@ class Simulator:
                 case = self.case_library.recognize(anomaly)
                 if case is None:
                     self._log(f"  ⚠️  No matching case found! Attempting to continue...")
-                    plan_idx += 1
                     continue
 
                 self._log(f"  🧠 Case matched: '{case.name}'")
@@ -332,45 +434,50 @@ class Simulator:
                 # --- Replan ---
                 self._log("")
                 self._log(f"  🔵 REPLANNING (attempt #{self._replan_counter + 1})...")
-                new_plan = self._replan(response)
+                try:
+                    new_plan = self._replan(response)
+                except ValueError as error:                              # e.g. a deadline the writer cannot keep
+                    self._log(f"  ❌ {error}")
+                    new_plan = None
 
                 if new_plan is None:
                     self._log(f"  ❌ Replanning failed — no valid plan found.")
-                    self.result.failure_reason = (
-                        f"Replanning failed after {anomaly.anomaly_type.name} anomaly."
-                    )
-                    self.result.final_state = self.state
-                    return self.result
+                    return self._stop(f"Replanning failed after {anomaly.anomaly_type.name} anomaly.")
 
                 self._replan_counter += 1
                 self.result.replans_triggered += 1
                 self._log(f"  ✅ New plan: {len(new_plan)} actions")
                 self._print_plan(new_plan)
 
-                # Adopt the replanned problem's remaining goals so snapshots
-                # and reports reflect the world the new plan is pursuing.
-                try:
-                    from pddl_parser import parse_problem
-                    replanned_problem = parse_problem(self._last_replan_problem_path)
-                    self.problem.goal_conditions = replanned_problem.goal_conditions
-                except Exception:
-                    pass  # Keep the previous goals if the temp file is unreadable.
-
                 # Replace current plan
                 plan = new_plan
                 plan_idx = 0
+                self._register_plan(plan, f"Replan #{self._replan_counter}", "replanned")
                 self._log("")
-                self._emit_json_state(event=f"ANOMALY: {anomaly.description}")
+                self._emit_json_state(
+                    event=f"ANOMALY: {anomaly.description}",
+                    kind="anomaly",
+                    extra={"anomaly": {
+                        "step": step,
+                        "type": anomaly.anomaly_type.name,
+                        "description": anomaly.description,
+                        "response": response.explanation,
+                    }},
+                )
                 continue
 
             self._log(f"  Step {step:3d}: 🟢 {action}")
-
-            if action.name.lower() in ("drive", "drive-instant"):
-                self._execute_drive(action, step)
-            else:
-                self.state = apply_action(self.state, action)
-                self.result.total_actions_executed += 1
-                self._finish_action(action)
+            try:
+                if action.name.lower() in ("drive", "drive-instant"):
+                    self._execute_drive(action)                          # Emits hourly frames, then applies the action.
+                else:
+                    self.state = apply_action(self.state, action)
+                    self.result.total_actions_executed += 1
+                    self._plan_pos += 1
+                    self._finish_action(action)
+            except ValueError as error:
+                self._log(f"  ❌ {error}")
+                return self._stop(str(error))
 
             plan_idx += 1
 
@@ -383,81 +490,68 @@ class Simulator:
         self._log("━" * 65)
         self._log("  PHASE 3: Mission Report")
         self._log("━" * 65)
-
-        # Success requires the (possibly replanned) goals to actually hold.
+        self.result.final_state = self.state
+        pending_steps = sorted(item.step for item in self.scheduled_anomalies)
         unsatisfied = self._unsatisfied_goals()
-
-        if unsatisfied:
+        if pending_steps:
             self.result.success = False
             self.result.failure_reason = (
-                f"Plan finished but {len(unsatisfied)} goal(s) unsatisfied: "
-                + "; ".join(unsatisfied[:3])
+                "Plan ended before scheduled anomaly step(s): "
+                + ", ".join(str(s) for s in pending_steps)
             )
-            self._log(f"  ❌ {self.result.failure_reason}")
+        elif unsatisfied:
+            self.result.success = False
+            self.result.failure_reason = "Plan ended before satisfying: " + ", ".join(unsatisfied)
         else:
             self.result.success = True
-
-        self.result.final_state = self.state
         self._print_report()
 
         return self.result
 
-    def _unsatisfied_goals(self) -> List[str]:
-        """Return human-readable descriptions of goals that do not hold in the final state."""
-        unsatisfied = []
+    def _stop(self, reason: str) -> SimulationResult:
+        """End the run early with a reason, recording a final 'stopped' frame for the map."""
+        self.result.failure_reason = reason
+        self.result.final_state = self.state
+        self._emit_json_state(event=f"STOPPED: {reason}", kind="stopped")
+        self._print_report()
+        return self.result
 
+    def _unsatisfied_goals(self) -> List[str]:
+        """Return readable descriptions of goals missing from the final state."""
+        missing = []
         for goal in self.problem.goal_conditions:
             args = goal.arguments
-
+            satisfied = False
             if goal.predicate == "delivered" and len(args) == 3:
-                pkg, loc, deadline = args
-                matches = [t for p, l, t in self.state.delivered if p == pkg and l == loc]
-
-                if not matches:
-                    unsatisfied.append(f"{pkg} not delivered to {loc}")
-                    continue
-
-                try:
-                    delivered_idx = min(
-                        self.state.time_steps.index(t) for t in matches
-                    )
-                    deadline_idx = self.state.time_steps.index(deadline)
-                except ValueError:
-                    continue
-
-                if delivered_idx > deadline_idx:
-                    unsatisfied.append(
-                        f"{pkg} delivered to {loc} late ({matches[0]} > {deadline})"
-                    )
-
+                satisfied = tuple(args) in self.state.delivered
             elif goal.predicate == "at-destination" and len(args) == 2:
-                pkg, loc = args
+                satisfied = tuple(args) in self.state.at_destination
 
-                if (pkg, loc) not in self.state.at_destination:
-                    unsatisfied.append(f"{pkg} not at {loc}")
+            if not satisfied:
+                missing.append(f"({goal.predicate} {' '.join(args)})")
+        return missing
 
-        return unsatisfied
+    # ------------------------------------------------------------------
+    # Executing actions
+    # ------------------------------------------------------------------
 
-    def _execute_drive(self, action, step: int):
-        """Execute a drive action, emitting one snapshot per hour in transit.
+    def _execute_drive(self, action: PlanAction):
+        """Execute a drive, emitting one snapshot per hour while the truck is on the road.
 
-        The truck's motion is normalized to the road's rounded travel time:
-        a road rated 35mi @ 30mph = 1t shows the truck covering 1/dur of the
-        road at each hourly tick, so it always arrives exactly on the final
-        tick. Intermediate frames keep the truck logically at its origin
-        location while displaying its interpolated grid position.
+        The truck's motion is normalized to the road's rounded travel time: on a
+        2t road it covers half the distance at each hourly tick, so it always
+        arrives exactly on the final tick. Intermediate frames keep the truck
+        logically at its origin while displaying its interpolated grid position.
         """
-        state = self.state
-        name = action.name.lower()
+        error = validate_action(self.state, action)                     # Never draw frames for an invalid drive.
+        if error:
+            raise ValueError(f"Invalid action {action}: {error}")
 
-        if name == "drive-instant":
-            truck, from_loc, to_loc, t1 = action.args
-            dur = 0
-            i1 = self._time_index(t1)
-        else:
-            truck, from_loc, to_loc, t1, t2 = action.args
-            i1, i2 = self._time_index(t1), self._time_index(t2)
-            dur = (i2 - i1) if (i1 is not None and i2 is not None and i2 >= i1) else 1
+        state = self.state
+        truck, from_loc, to_loc, t1 = action.args[:4]
+        steps = state.time_steps
+        i1 = steps.index(t1)
+        dur = 0 if action.name.lower() == "drive-instant" else steps.index(action.args[4]) - i1
 
         d = state.road_distance.get((from_loc, to_loc))
         s = state.road_speed.get((from_loc, to_loc))
@@ -466,12 +560,10 @@ class Simulator:
 
         # In-transit frames for each completed hour except the arrival hour.
         for h in range(1, dur):
-            snapshot = self._build_state_snapshot()
-
-            if i1 is not None and i1 + h < len(state.time_steps):
-                t_mid = state.time_steps[i1 + h]
-                snapshot["current_time"] = t_mid
-                snapshot["hour"] = i1 + h
+            snapshot = self._build_state_snapshot(kind="transit")
+            t_mid = steps[i1 + h]
+            snapshot["current_time"] = t_mid
+            snapshot["hour"] = self._time_index(t_mid)
 
             frac = h / dur
             pos = {
@@ -485,13 +577,11 @@ class Simulator:
                 "miles_covered": round(frac * d, 1) if d is not None else None,
                 "hours_remaining": dur - h,
             }
-
-            if x1 is not None and x2 is not None and y1 is not None and y2 is not None:
+            if None not in (x1, y1, x2, y2):
                 pos["x"] = x1 + frac * (x2 - x1)
                 pos["y"] = y1 + frac * (y2 - y1)
 
             snapshot["truck_positions"][truck] = pos
-
             miles_txt = f"{frac * d:.0f}/{d}mi" if d is not None else f"{frac:.0%}"
             self._emit_json_state(
                 event=f"(driving {truck} {from_loc}→{to_loc} {miles_txt})",
@@ -501,13 +591,14 @@ class Simulator:
         # Arrival: apply the action for real, then emit the final frame.
         self.state = apply_action(self.state, action)
         self.result.total_actions_executed += 1
+        self._plan_pos += 1
         self._finish_action(action)
 
-    def _finish_action(self, action):
+    def _finish_action(self, action: PlanAction):
         """Export state and emit the post-action snapshot."""
         action_clean = f"action_{action.name}_" + "_".join(action.args)
         self._export_state(action_clean)
-        self._emit_json_state(event=str(action))
+        self._emit_json_state(event=str(action), kind="action")
 
     def _apply_anomaly_to_state(self, anomaly: AnomalyEvent, response: CaseResponse):
         """Apply the immediate effects of an anomaly to the world state."""
@@ -537,6 +628,7 @@ class Simulator:
             if truck in self.state.truck_locations:
                 del self.state.truck_locations[truck]
             self.state.all_trucks = [t for t in self.state.all_trucks if t != truck]
+            self._broken_trucks.add(truck)
             self._log(f"  ↳ Removed {truck} from service")
 
         elif anomaly.anomaly_type == AnomalyType.NEW_DELIVERY:
@@ -552,37 +644,51 @@ class Simulator:
 
     def _replan(self, response: CaseResponse) -> Optional[List[PlanAction]]:
         """Generate a new plan by writing a modified PDDL problem and re-invoking Fast Downward."""
-        # Create a temporary problem file
         temp_dir = tempfile.mkdtemp(prefix="trucks_replan_")
         temp_problem = os.path.join(temp_dir, "replanned_problem.pddl")
         temp_plan = os.path.join(temp_dir, "sas_plan")
-        self._last_replan_problem_path = temp_problem
 
-        # Generate the modified problem
-        pddl_text = generate_problem_pddl(
-            state=self.state,
-            original_problem=self.problem,
-            response=response,
-            output_path=temp_problem,
-        )
+        try:
+            pddl_text = generate_problem_pddl(
+                state=self.state,
+                original_problem=self.problem,
+                response=response,
+                output_path=temp_problem,
+            )
 
-        if self.verbose:
-            self._log(f"  [Replan] Generated problem file: {temp_problem}")
-            self._log(f"  [Replan] Problem preview:")
-            for line in pddl_text.split('\n')[:5]:
-                self._log(f"    {line}")
-            self._log(f"    ...")
+            if self.verbose:
+                self._log(f"  [Replan] Generated problem file: {temp_problem}")
+                self._log(f"  [Replan] Problem preview:")
+                for line in pddl_text.split('\n')[:5]:
+                    self._log(f"    {line}")
+                self._log(f"    ...")
 
-        # Invoke Fast Downward on the modified problem
-        cleanup_planner_files()
-        plan = run_fast_downward(
-            self.domain_path,
-            temp_problem,
-            search=self.search,
-            plan_file=temp_plan,
-        )
+            plan = run_fast_downward(
+                self.domain_path,
+                temp_problem,
+                search=self.search,
+                plan_file=temp_plan,
+                fast_downward_script=self.fast_downward_script,
+            )
 
-        return plan
+            if plan is not None:
+                # The generated problem contains all accumulated anomaly goal
+                # changes. Keeping it as the current problem ensures a later
+                # replan does not forget an earlier new delivery/deadline change.
+                self.problem = parse_problem(temp_problem)
+                self.state.time_steps = list(self.problem.objects.get("time", []))
+                self.state.le_predicates = {
+                    (args[0], args[1])
+                    for predicate, args in self.problem.init_facts
+                    if predicate == "le" and len(args) == 2
+                }
+            return plan
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    # ------------------------------------------------------------------
+    # Output
+    # ------------------------------------------------------------------
 
     def _print_plan(self, plan: List[PlanAction]):
         """Print a plan summary."""
@@ -607,11 +713,10 @@ class Simulator:
         if r.final_state:
             self._log(state_summary(r.final_state))
 
-        # Check goal satisfaction
         if r.final_state:
-            delivered = r.final_state.delivered
-            at_dest = r.final_state.at_destination
-            self._log(f"  Deliveries completed: {len(delivered) + len(at_dest)}")
+            completed = {p for p, _, _ in r.final_state.delivered}
+            completed.update(p for p, _ in r.final_state.at_destination)
+            self._log(f"  Deliveries completed: {len(completed)}")
 
         self._log("")
         self._log("=" * 65)
@@ -621,44 +726,31 @@ class Simulator:
         try:
             print(message)
         except UnicodeEncodeError:
-            # Fallback: replace unencodable characters
             print(message.encode('ascii', errors='replace').decode('ascii'))
 
 
-def get_run_snapshots(
-    domain_path: str,
-    problem_path: str,
-    **simulator_kwargs,
-) -> Dict[str, Any]:
+def summarize_result(sim: "Simulator", result: SimulationResult) -> Dict[str, Any]:
+    """Plain-dict run summary shared by server.py and get_run_snapshots()."""
+    return {
+        "status": "SUCCESS" if result.success else "FAILED",
+        "failure_reason": result.failure_reason,
+        "plan_source": result.plan_source,
+        "saved_plan": result.saved_plan_path,
+        "actions_executed": result.total_actions_executed,
+        "replans_triggered": result.replans_triggered,
+        "anomalies": [
+            {"type": a.anomaly_type.name, "description": a.description}
+            for a in result.anomalies_encountered
+        ],
+    }
+
+
+def get_run_snapshots(domain_path: str, problem_path: str, **simulator_kwargs) -> Dict[str, Any]:
     """
     Run a simulation in-process and return everything a visualizer needs,
-    with no subprocess and no stdout parsing involved.
-
-    Returns:
-        {
-          "snapshots": List[dict]   # sim.state_history
-          "summary": {
-              "status": "SUCCESS" | "FAILED",
-              "failure_reason": str,
-              "actions_executed": int,
-              "replans_triggered": int,
-              "anomalies": [{"type": str, "description": str}, ...],
-          },
-        }
+    with no subprocess and no stdout parsing involved:
+        {"snapshots": [...], "plans": [...], "summary": {...}}
     """
     sim = Simulator(domain_path=domain_path, problem_path=problem_path, **simulator_kwargs)
     result = sim.run()
-
-    return {
-        "snapshots": sim.state_history,
-        "summary": {
-            "status": "SUCCESS" if result.success else "FAILED",
-            "failure_reason": result.failure_reason,
-            "actions_executed": result.total_actions_executed,
-            "replans_triggered": result.replans_triggered,
-            "anomalies": [
-                {"type": a.anomaly_type.name, "description": a.description}
-                for a in result.anomalies_encountered
-            ],
-        },
-    }
+    return {"snapshots": sim.state_history, "plans": sim.plans, "summary": summarize_result(sim, result)}
